@@ -1,0 +1,35 @@
+# Скопируйте в .env и заполните строки для СВОЕЙ роли.
+# ROLE=relay     — RU-мост: HAProxy :443 → XHTTP → VLESS RAW+TLS на backbone
+# ROLE=edge      — одиночный EU для клиентов, без RU-relay
+# ROLE=backbone  — EU-магистраль: Xray :443 VLESS RAW+TLS, принимает relay
+
+ROLE="relay"
+
+# ── Все роли ───────────────────────────────────────────────────────
+# Имя ЭТОГО сервера (SAN wildcard-сертификата, SNI, хост в ссылке).
+# relay:    ru1.nerabotaet.com  — куда стучится клиент
+# edge:     eu1.nerabotaet.com  — куда стучится клиент
+# backbone: eu1.nerabotaet.com  — куда стучится relay
+#           (это же значение EU_SERVER_DOMAIN на стороне парного relay)
+DOMAIN_NAME="REGION.nerabotaet.com"
+
+# Каталог статического файла подписки: /$SUBS_PATH/update_subs_link
+# relay/edge:  xttp-ссылка для вашего RestAPI (не для конечных клиентов)
+# backbone:    vless RAW+TLS-ссылка, которую relay забирает
+#              скриптом from_ru_relay_update_eu_uuid.sh
+SUBS_PATH="uuid-каталог-подписки"
+
+# IP через пробел. Подписка отдаётся только им, остальным — как будто пути нет.
+# ufw: на каждый IP — allow from <ip> comment "All from allowed_ip" (все порты).
+# "*" — подписка и (на backbone) 443 открыты всем.
+# relay/edge: IP вашего RestAPI
+# backbone:   IP парного relay
+ALLOWED_IP="1.2.3.4"
+
+# ── Только ROLE=relay ──────────────────────────────────────────────
+# Имя парного backbone. Порт 443, SNI и flow=xtls-rprx-vision — в коде.
+EU_SERVER_DOMAIN="EUR_REGION.nerabotaet.com"
+
+# ── ROLE=relay и ROLE=edge (клиентская xttp-ссылка) ────────────────
+# На сервере XHTTP mode всегда auto. Здесь — что писать в ссылку.
+CLIENT_MODE="packet-up"

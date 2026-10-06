@@ -1,0 +1,5 @@
+.env
+.xttp_secrets
+.idea/
+*.log
+searxng/.env

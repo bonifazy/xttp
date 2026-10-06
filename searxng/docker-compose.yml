@@ -1,0 +1,19 @@
+name: xttp-searxng
+
+services:
+  valkey:
+    image: docker.io/valkey/valkey:8-alpine
+    command: valkey-server --save 30 1 --loglevel warning
+    restart: unless-stopped
+
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    restart: unless-stopped
+    depends_on:
+      - valkey
+    ports:
+      - "127.0.0.1:8888:8080"
+    volumes:
+      - ./core-config:/etc/searxng:rw
+    env_file:
+      - .env

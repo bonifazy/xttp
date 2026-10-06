@@ -1,0 +1,8 @@
+# Заглушка от зондирования. secret_key задаётся SEARXNG_SECRET в searxng/.env
+use_default_settings: true
+server:
+  limiter: true
+  image_proxy: false
+  method: GET
+redis:
+  url: redis://valkey:6379/0
