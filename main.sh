@@ -177,5 +177,20 @@ add_cron "0 6 * * 1 ${SCRIPT_DIR}/update_geodata.sh" "update_geodata.sh"
 add_cron "58 23 * * * truncate -s 0 /var/log/nginx/access.log /var/log/nginx/error.log /var/log/haproxy.log 2>/dev/null || true" "/var/log/nginx/access.log"
 add_cron "59 23 * * * ${SCRIPT_DIR}/clear_xray_logs.sh" "clear_xray_logs.sh"
 
+if [[ "$ROLE" == "edge" ]]; then
+  current="$(sudo crontab -l 2>/dev/null || true)"
+  current="$(printf '%s\n' "$current" \
+    | grep -vF "change_uuid.sh" \
+    | grep -vF "Ротация XTTP UUID для edge EU сервера" \
+    | grep -v '^$' || true)"
+  printf '%s\n' \
+    "$current" \
+    "# Ротация XTTP UUID для edge EU сервера" \
+    "1 0 3,7,13,17,23,27 * * ${SCRIPT_DIR}/change_uuid.sh" \
+    | grep -v '^$' | sudo crontab -
+  echo "Cron: change_uuid.sh (edge)"
+  echo "1 0 3,7,13,17,23,27 * * ${SCRIPT_DIR}/change_uuid.sh"
+fi
+
 echo "Файл подписки:"
 echo "$LINK_FILE"
