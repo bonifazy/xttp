@@ -59,6 +59,22 @@ _die() {
   exit 1
 }
 
+# Свежий VPS часто держит dpkg lock (unattended-upgrades / cloud-init).
+# Ждём до ~2 мин (12×10 с), lock сами не снимаем.
+wait_for_apt() {
+  local n=0
+  while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    n=$((n + 1))
+    if [[ "$n" -gt 12 ]]; then
+      echo "apt lock занят дольше 2 минут. Смотрите: ps aux | grep -E 'apt|dpkg'" >&2
+      sudo fuser -v /var/lib/dpkg/lock-frontend >&2 || true
+      return 1
+    fi
+    echo "ждём освобождения apt lock (${n}/12)..."
+    sleep 10
+  done
+}
+
 case "$ROLE" in
   relay|edge|backbone) ;;
   *) _die "ROLE должен быть relay, edge или backbone. Сейчас: '${ROLE}'" ;;

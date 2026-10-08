@@ -27,7 +27,9 @@ fi
 echo ""
 
 echo "Установка python3 curl"
+wait_for_apt
 sudo apt-get update
+wait_for_apt
 sudo apt-get install -y python3 curl ca-certificates
 "$PYTHON" --version
 echo ""
@@ -39,6 +41,7 @@ ensure_backup_dir
 echo "Бекапы: $BACKUP_DIR"
 
 if ! command -v ufw >/dev/null 2>&1; then
+  wait_for_apt
   sudo apt-get install -y ufw
 fi
 apply_ufw
@@ -46,6 +49,7 @@ echo ""
 
 if ! command -v nginx >/dev/null 2>&1; then
   echo "Установка Nginx"
+  wait_for_apt
   sudo apt-get install -y nginx
 fi
 sudo systemctl unmask nginx
@@ -61,6 +65,7 @@ sudo chown -R "${PROJECT_USER}:www-data" /var/www/html/
 if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
   if ! command -v haproxy >/dev/null 2>&1; then
     echo "Установка HAProxy"
+    wait_for_apt
     sudo apt-get install -y haproxy
   fi
   sudo systemctl unmask haproxy
@@ -70,7 +75,9 @@ if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
 
   if ! command -v docker >/dev/null 2>&1; then
     echo "Установка Docker"
+    wait_for_apt
     sudo apt-get install -y docker.io
+    wait_for_apt
     sudo apt-get install -y docker-compose-v2 || sudo apt-get install -y docker-compose || true
   fi
   sudo systemctl enable --now docker
