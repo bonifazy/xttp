@@ -41,7 +41,7 @@ XRAY_GROUP="${XRAY_GROUP:-nogroup}"
 
 LINK_FILE="${LINK_FILE:-/var/www/html/${SUBS_PATH:-}/update_subs_link}"
 
-ROLE="${ROLE:-}"
+ROLE="${ROLE:-edge}"
 DOMAIN_NAME="${DOMAIN_NAME:-}"
 SUBS_PATH="${SUBS_PATH:-}"
 ALLOWED_IP="${ALLOWED_IP:-}"
@@ -649,6 +649,32 @@ SEARXNG_SECRET=${secret}
 EOF
   chmod 600 "$secret_file"
   chown_project_user "$secret_file"
+}
+
+# docker compose из каталога searxng. Файлы проекта не удаляет.
+searxng_compose() {
+  if sudo docker compose version >/dev/null 2>&1; then
+    sudo docker compose -f "${SEARXNG_DIR}/docker-compose.yml" --env-file "${SEARXNG_DIR}/.env" "$@"
+  else
+    sudo docker-compose -f "${SEARXNG_DIR}/docker-compose.yml" --env-file "${SEARXNG_DIR}/.env" "$@"
+  fi
+}
+
+# Пересоздаёт контейнеры, чтобы SEARXNG_BASE_URL из текущего .env попал в процесс.
+searxng_up() {
+  write_searxng_env
+  echo "Запуск SearXNG (docker compose --force-recreate)"
+  searxng_compose up -d --force-recreate --remove-orphans
+}
+
+# Останавливает контейнеры при ROLE=backbone. volumes и searxng/.env не трогает.
+searxng_stop() {
+  if [[ ! -f "${SEARXNG_DIR}/docker-compose.yml" ]]; then
+    return 0
+  fi
+  if command -v docker >/dev/null 2>&1; then
+    searxng_compose stop || true
+  fi
 }
 
 restart_xray() {

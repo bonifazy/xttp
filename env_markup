@@ -3,7 +3,7 @@
 # ROLE=edge      — одиночный EU для клиентов, без RU-relay
 # ROLE=backbone  — EU-магистраль: Xray :443 VLESS RAW+TLS, принимает relay
 
-ROLE="relay"
+ROLE="edge"
 
 # ── Все роли ───────────────────────────────────────────────────────
 # Имя ЭТОГО сервера (SAN wildcard-сертификата, SNI, хост в ссылке).

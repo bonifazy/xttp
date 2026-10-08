@@ -74,14 +74,14 @@ if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
     sudo apt-get install -y docker-compose-v2 || sudo apt-get install -y docker-compose || true
   fi
   sudo systemctl enable --now docker
-  write_searxng_env
-  echo "Запуск SearXNG (docker compose)"
-  if sudo docker compose version >/dev/null 2>&1; then
-    sudo docker compose -f "${SEARXNG_DIR}/docker-compose.yml" --env-file "${SEARXNG_DIR}/.env" up -d
-  else
-    sudo docker-compose -f "${SEARXNG_DIR}/docker-compose.yml" --env-file "${SEARXNG_DIR}/.env" up -d
-  fi
+  searxng_up
   echo ""
+else
+  # ROLE=backbone: :443 занимает Xray. Старый HAProxy/SearXNG с прошлой роли глушим.
+  if systemctl list-unit-files --type=service | grep -q '^haproxy.service'; then
+    sudo systemctl disable --now haproxy || true
+  fi
+  searxng_stop
 fi
 
 if [[ ! -x /usr/local/bin/xray ]]; then
