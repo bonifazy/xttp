@@ -1,7 +1,7 @@
 # Скопируйте в .env и заполните строки для СВОЕЙ роли.
 # ROLE=relay     — RU-мост: HAProxy :443 → XHTTP → VLESS RAW+TLS на backbone
 # ROLE=edge      — одиночный EU для клиентов, без RU-relay
-# ROLE=backbone  — EU-магистраль: Xray :443 VLESS RAW+TLS, принимает relay
+# ROLE=backbone  — EU-магистраль: Xray :EU_SERVER_PORT VLESS RAW+TLS, принимает relay
 
 ROLE="edge"
 
@@ -21,14 +21,19 @@ SUBS_PATH="uuid-каталог-подписки"
 
 # IP через пробел. Подписка отдаётся только им, остальным — как будто пути нет.
 # ufw: на каждый IP — allow from <ip> comment "All from allowed_ip" (все порты).
-# "*" — подписка и (на backbone) 443 открыты всем.
+# "*" — подписка открыта всем. На backbone ufw открывает EU_SERVER_PORT.
 # relay/edge: IP вашего RestAPI
 # backbone:   IP парного relay
 ALLOWED_IP="1.2.3.4"
 
-# ── Только ROLE=relay ──────────────────────────────────────────────
-# Имя парного backbone. Порт 443, SNI и flow=xtls-rprx-vision — в коде.
+# ── ROLE=relay и ROLE=backbone ─────────────────────────────────────
+# Имя парного backbone (только relay). SNI и flow=xtls-rprx-vision — в коде.
 EU_SERVER_DOMAIN="EUR_REGION.nerabotaet.com"
+
+# Порт VLESS RAW+TLS магистрали (и URL подписки relay→backbone).
+# backbone: Xray слушает здесь. relay: сюда стучится outbound.
+# С RU ALPN на :443 часто режут — тогда 8443.
+EU_SERVER_PORT=8443
 
 # ── ROLE=relay и ROLE=edge (клиентская xttp-ссылка) ────────────────
 # На сервере XHTTP mode всегда auto. Здесь — что писать в ссылку.

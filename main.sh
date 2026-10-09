@@ -5,7 +5,7 @@
 #   2. Сертификаты в /tmp/fullchain.crt и /tmp/cert.key (или уже в SSL_DIR)
 #   3. DNS DOMAIN_NAME смотрит на этот VPS
 #   4. ROLE=relay: парный backbone уже отдаёт /$SUBS_PATH/update_subs_link
-#      IP этого relay есть в ALLOWED_IP на backbone
+#      на EU_SERVER_PORT (часто 8443). IP этого relay есть в ALLOWED_IP на backbone
 #
 # Идемпотентно: .xttp_secrets не перезаписывает. Конфиги собирает заново.
 set -euo pipefail
@@ -20,6 +20,10 @@ echo "SUBS_PATH: $SUBS_PATH"
 echo "ALLOWED_IP: $ALLOWED_IP"
 if [[ "$ROLE" == "relay" ]]; then
   echo "EU_SERVER_DOMAIN: $EU_SERVER_DOMAIN"
+  echo "EU_SERVER_PORT: $EU_SERVER_PORT"
+fi
+if [[ "$ROLE" == "backbone" ]]; then
+  echo "EU_SERVER_PORT: $EU_SERVER_PORT"
 fi
 if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
   echo "CLIENT_MODE: $CLIENT_MODE"
@@ -81,7 +85,7 @@ if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
   searxng_up
   echo ""
 else
-  # ROLE=backbone: :443 — только Xray (fallbacks на nginx = подписка).
+  # ROLE=backbone: EU_SERVER_PORT — только Xray (fallbacks на nginx = подписка).
   # Предыдущая роль edge/relay могла оставить HAProxy enabled — глушим всегда.
   stop_haproxy_for_backbone
   searxng_stop

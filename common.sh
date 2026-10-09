@@ -29,8 +29,9 @@ SEARXNG_DIR="${SCRIPT_DIR}/searxng"
 SECRETS_FILE="${SCRIPT_DIR}/.xttp_secrets"
 PYTHON="${PYTHON:-python3}"
 
-# Константы. В .env не объявляются.
-EU_SERVER_PORT=443
+# Порт магистрали: из .env, иначе 443.
+# С RU ALPN на :443 часто режут — для пары relay↔backbone ставят 8443.
+EU_SERVER_PORT="${EU_SERVER_PORT:-443}"
 EU_FLOW="xtls-rprx-vision"
 XHTTP_MODE="auto"
 XRAY_XHTTP_LISTEN="127.0.0.1"
@@ -88,6 +89,10 @@ fi
 
 if [[ "$ROLE" == "relay" && -z "$EU_SERVER_DOMAIN" ]]; then
   _die "ROLE=relay требует EU_SERVER_DOMAIN в .env"
+fi
+
+if [[ ! "$EU_SERVER_PORT" =~ ^[0-9]+$ ]] || [[ "$EU_SERVER_PORT" -lt 1 || "$EU_SERVER_PORT" -gt 65535 ]]; then
+  _die "EU_SERVER_PORT должен быть 1-65535. Сейчас: '${EU_SERVER_PORT}'"
 fi
 
 if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
@@ -202,6 +207,19 @@ ensure_secrets() {
   fi
 }
 
+# https URL. Порт 443 в authority не пишем.
+https_url() {
+  local host="$1"
+  local path="$2"
+  local port="${3:-$EU_SERVER_PORT}"
+  path="/${path#/}"
+  if [[ "$port" == "443" ]]; then
+    printf 'https://%s%s' "$host" "$path"
+  else
+    printf 'https://%s:%s%s' "$host" "$port" "$path"
+  fi
+}
+
 # Собирает ссылку подписки. Хост — DOMAIN_NAME этого сервера.
 # relay/edge: vless+xhttp+tls. backbone: vless+tcp+tls+vision (для relay).
 build_vless_link() {
@@ -211,8 +229,8 @@ build_vless_link() {
     return 1
   fi
   if [[ "$ROLE" == "backbone" ]]; then
-    printf 'vless://%s@%s:443?type=tcp&encryption=none&flow=%s&security=tls&sni=%s&fp=chrome&alpn=http%%2F1.1\n' \
-      "$uuid" "$DOMAIN_NAME" "$EU_FLOW" "$DOMAIN_NAME"
+    printf 'vless://%s@%s:%s?type=tcp&encryption=none&flow=%s&security=tls&sni=%s&fp=chrome&alpn=http%%2F1.1\n' \
+      "$uuid" "$DOMAIN_NAME" "$EU_SERVER_PORT" "$EU_FLOW" "$DOMAIN_NAME"
     return 0
   fi
   if [[ -z "${XHTTP_PATH:-}" ]]; then
@@ -247,10 +265,10 @@ parse_vless_uuid() {
 # Качает подписку с backbone. Пишет UUID в stdout. При ошибке — подробности в stderr.
 fetch_eu_uuid() {
   local url code tmp link uuid
-  url="https://${EU_SERVER_DOMAIN}/${SUBS_PATH}/update_subs_link"
+  url="$(https_url "$EU_SERVER_DOMAIN" "${SUBS_PATH}/update_subs_link")"
   tmp="$(mktemp)"
   echo "Запрос EU_UUID: $url" >&2
-  code="$(curl -4sS -o "$tmp" -w '%{http_code}' --retry 3 --retry-delay 2 --max-time 20 "$url" || true)"
+  code="$(curl -4sS --http1.1 -o "$tmp" -w '%{http_code}' --retry 3 --retry-delay 2 --max-time 20 "$url" || true)"
   link="$(tr -d '\r\n ' < "$tmp")"
   rm -f "$tmp"
   if [[ "$code" != "200" ]] || [[ "$link" != vless://* ]]; then
@@ -272,8 +290,8 @@ apply_ufw() {
   if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
     sudo ufw allow 80/tcp comment "HTTP redirect"
     sudo ufw allow 443/tcp comment "HTTPS"
-  elif [[ "$ALLOWED_IP" == "*" ]]; then
-    sudo ufw allow 443/tcp comment "HTTPS"
+  elif [[ "$ROLE" == "backbone" ]]; then
+    sudo ufw allow "${EU_SERVER_PORT}/tcp" comment "HTTPS backbone"
   fi
   if [[ "$ALLOWED_IP" != "*" ]]; then
     while read -r ip; do
@@ -355,7 +373,7 @@ if role == "backbone":
     inbound = {
         "tag": "vless-in",
         "listen": "0.0.0.0",
-        "port": 443,
+        "port": eu_port,
         "protocol": "vless",
         "settings": {
             "clients": [{"id": uuid, "flow": eu_flow, "email": "dim"}],
@@ -366,7 +384,7 @@ if role == "backbone":
             "network": "tcp",
             "security": "tls",
             "tlsSettings": {
-                "alpn": ["h2", "http/1.1"],
+                "alpn": ["http/1.1"],
                 "certificates": [{
                     "certificateFile": f"{ssl_dir}/fullchain.crt",
                     "keyFile": f"{ssl_dir}/cert.key",
@@ -724,48 +742,49 @@ restart_xray() {
   fi
 }
 
-# ROLE=backbone: HAProxy не должен держать :443 — иначе Xray не стартует
-# и https://$DOMAIN_NAME/$SUBS_PATH/update_subs_link молчит.
+# ROLE=backbone: HAProxy не должен держать TLS-порт — иначе Xray не стартует
+# и подписка через fallbacks молчит.
 stop_haproxy_for_backbone() {
-  echo "ROLE=backbone: останавливаю HAProxy, :443 отдаём Xray"
+  echo "ROLE=backbone: останавливаю HAProxy, :${EU_SERVER_PORT} отдаём Xray"
   sudo systemctl stop haproxy 2>/dev/null || true
   sudo systemctl disable haproxy 2>/dev/null || true
   sudo systemctl reset-failed haproxy 2>/dev/null || true
   local n
   for n in 1 2 3 4 5 6 7 8; do
-    if sudo ss -lntp 2>/dev/null | grep -E ':443\b' | grep -q haproxy; then
-      echo "ждём, пока HAProxy отпустит :443 (${n}/8)..."
+    if sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q haproxy; then
+      echo "ждём, пока HAProxy отпустит :${EU_SERVER_PORT} (${n}/8)..."
       sudo systemctl stop haproxy 2>/dev/null || true
       sleep 1
     else
       break
     fi
   done
-  if sudo ss -lntp 2>/dev/null | grep -E ':443\b' | grep -q haproxy; then
-    _die "ROLE=backbone: :443 всё ещё у HAProxy. Подписка через Xray fallbacks не поднимется."
+  if sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q haproxy; then
+    _die "ROLE=backbone: :${EU_SERVER_PORT} всё ещё у HAProxy. Подписка через Xray fallbacks не поднимется."
   fi
 }
 
-# После старта: на backbone :443 = xray, GET подписки возвращает vless://
+# После старта: на backbone EU_SERVER_PORT = xray, GET подписки возвращает vless://
 assert_role_frontends() {
   if [[ "$ROLE" != "backbone" ]]; then
     return 0
   fi
+  local url
+  url="$(https_url "$DOMAIN_NAME" "${SUBS_PATH}/update_subs_link")"
   if ! systemctl is-active --quiet xray; then
     sudo journalctl -u xray -n 40 --no-pager >&2 || true
-    _die "xray не active — https://${DOMAIN_NAME}/${SUBS_PATH}/update_subs_link не работает"
+    _die "xray не active — ${url} не работает"
   fi
-  if sudo ss -lntp 2>/dev/null | grep -E ':443\b' | grep -q haproxy; then
-    _die "после старта :443 снова у HAProxy"
+  if sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q haproxy; then
+    _die "после старта :${EU_SERVER_PORT} снова у HAProxy"
   fi
-  if ! sudo ss -lntp 2>/dev/null | grep -E ':443\b' | grep -q xray; then
+  if ! sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q xray; then
     sudo journalctl -u xray -n 40 --no-pager >&2 || true
-    _die "xray не слушает :443"
+    _die "xray не слушает :${EU_SERVER_PORT}"
   fi
-  local url code tmp
-  url="https://${DOMAIN_NAME}/${SUBS_PATH}/update_subs_link"
+  local code tmp
   tmp="$(mktemp)"
-  code="$(curl -4sk --resolve "${DOMAIN_NAME}:443:127.0.0.1" -o "$tmp" -w '%{http_code}' --max-time 10 "$url" || true)"
+  code="$(curl -4sk --http1.1 --resolve "${DOMAIN_NAME}:${EU_SERVER_PORT}:127.0.0.1" -o "$tmp" -w '%{http_code}' --max-time 10 "$url" || true)"
   if [[ "$code" != "200" ]] || ! grep -q '^vless://' "$tmp"; then
     echo "HTTP ${code} с ${url} (через 127.0.0.1)" >&2
     head -c 400 "$tmp" >&2 || true
