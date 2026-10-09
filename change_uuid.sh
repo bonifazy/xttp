@@ -18,4 +18,4 @@ write_xray_config
 restart_xray
 publish_link
 echo "updated ok"
-build_vless_link
+build_vless_link "$UUID"

@@ -13,6 +13,7 @@ if [[ ! -f "${SCRIPT_DIR}/.env" ]]; then
   exit 1
 fi
 
+# shellcheck source=/home/dim/xttp/.env
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/.env"
 
@@ -50,6 +51,7 @@ CLIENT_MODE="${CLIENT_MODE:-packet-up}"
 EU_SNI="${EU_SERVER_DOMAIN}"
 
 if [[ -f "$SECRETS_FILE" ]]; then
+  # shellcheck source=/home/dim/xttp/.xttp_secrets
   # shellcheck disable=SC1091
   source "$SECRETS_FILE"
 fi
@@ -185,6 +187,7 @@ ensure_secrets() {
     write_secrets
     return 0
   fi
+  # shellcheck source=/home/dim/xttp/.xttp_secrets
   # shellcheck disable=SC1091
   source "$SECRETS_FILE"
   if [[ -z "${UUID:-}" ]]; then
@@ -301,7 +304,7 @@ install_geodata() {
 
 publish_link() {
   sudo mkdir -p "/var/www/html/${SUBS_PATH}"
-  build_vless_link | sudo tee "$LINK_FILE" >/dev/null
+  build_vless_link "$UUID" | sudo tee "$LINK_FILE" >/dev/null
   sudo chown -R "${PROJECT_USER}:www-data" /var/www/html/
   sudo chmod 644 "$LINK_FILE"
   echo "Файл подписки: $LINK_FILE"
@@ -325,15 +328,16 @@ write_xray_config() {
     return 1
   fi
   "$PYTHON" - "/tmp/xray-config.json" "$ROLE" "$uuid" "$xhttp_path" "$eu_uuid" \
-    "$DOMAIN_NAME" "${EU_SERVER_DOMAIN:-}" "$EU_FLOW" "$XHTTP_MODE" \
-    "$XRAY_XHTTP_LISTEN" "$XRAY_XHTTP_PORT" "$SSL_DIR" "$NGINX_FALLBACK" <<'PY'
+    "$DOMAIN_NAME" "${EU_SERVER_DOMAIN:-}" "$EU_FLOW" "$EU_SERVER_PORT" "${EU_SNI:-}" \
+    "$XHTTP_MODE" "$XRAY_XHTTP_LISTEN" "$XRAY_XHTTP_PORT" "$SSL_DIR" "$NGINX_FALLBACK" <<'PY'
 import json, sys
 
 (
     dst, role, uuid, xhttp_path, eu_uuid, domain, eu_host, eu_flow,
-    xhttp_mode, xlisten, xport, ssl_dir, fallback,
+    eu_port, eu_sni, xhttp_mode, xlisten, xport, ssl_dir, fallback,
 ) = sys.argv[1:]
 xport = int(xport)
+eu_port = int(eu_port)
 fb_host, fb_port = fallback.rsplit(":", 1)
 
 log = {"loglevel": "warning", "access": "none"}
@@ -406,7 +410,7 @@ else:
             "settings": {
                 "vnext": [{
                     "address": eu_host,
-                    "port": 443,
+                    "port": eu_port,
                     "users": [{
                         "id": eu_uuid,
                         "encryption": "none",
@@ -418,7 +422,7 @@ else:
                 "network": "tcp",
                 "security": "tls",
                 "tlsSettings": {
-                    "serverName": eu_host,
+                    "serverName": eu_sni or eu_host,
                     "alpn": ["http/1.1"],
                     "fingerprint": "chrome",
                 },
@@ -576,6 +580,13 @@ PY
 }
 
 write_nginx_config() {
+  if [[ -f /etc/nginx/sites-available/default ]]; then
+    backup_if_exists /etc/nginx/sites-available/default nginx_sites_available_default
+  fi
+  if [[ -e /etc/nginx/sites-enabled/default && ! -L /etc/nginx/sites-enabled/default ]]; then
+    backup_if_exists /etc/nginx/sites-enabled/default nginx_sites_enabled_default
+  fi
+
   "$PYTHON" - "/tmp/nginx_default" "$SUBS_PATH" "$ALLOWED_IP" <<'PY'
 import sys
 dst, subs, allowed = sys.argv[1:]
@@ -620,6 +631,13 @@ with open(dst, "w", encoding="utf-8") as f:
 PY
   sudo install -o root -g root -m 644 /tmp/nginx_default "$NGINX_SITE"
   rm -f /tmp/nginx_default
+  echo "nginx default перезаписан: $NGINX_SITE"
+
+  # Всегда свой vhost: убрать чужой файл/ссылку в sites-enabled и поставить symlink.
+  sudo mkdir -p /etc/nginx/sites-enabled
+  sudo rm -f /etc/nginx/sites-enabled/default
+  sudo ln -sfn "$NGINX_SITE" /etc/nginx/sites-enabled/default
+  echo "sites-enabled/default -> $NGINX_SITE"
 }
 
 install_haproxy_cert() {
@@ -653,7 +671,8 @@ write_searxng_env() {
   local secret_file="${SEARXNG_DIR}/.env"
   local secret=""
   if [[ -f "$secret_file" ]]; then
-    # shellcheck disable=SC1090
+    # shellcheck source=/home/dim/xttp/searxng/.env
+    # shellcheck disable=SC1091
     secret="$(. "$secret_file"; printf '%s' "${SEARXNG_SECRET:-}")"
   fi
   if [[ -z "$secret" ]]; then
@@ -696,9 +715,64 @@ searxng_stop() {
 restart_xray() {
   if [[ "$(id -u)" -eq 0 ]]; then
     xray run -test -config "$XRAY_CONFIG"
+    systemctl reset-failed xray 2>/dev/null || true
     systemctl restart xray
   else
     sudo xray run -test -config "$XRAY_CONFIG"
+    sudo systemctl reset-failed xray 2>/dev/null || true
     sudo systemctl restart xray
   fi
+}
+
+# ROLE=backbone: HAProxy не должен держать :443 — иначе Xray не стартует
+# и https://$DOMAIN_NAME/$SUBS_PATH/update_subs_link молчит.
+stop_haproxy_for_backbone() {
+  echo "ROLE=backbone: останавливаю HAProxy, :443 отдаём Xray"
+  sudo systemctl stop haproxy 2>/dev/null || true
+  sudo systemctl disable haproxy 2>/dev/null || true
+  sudo systemctl reset-failed haproxy 2>/dev/null || true
+  local n
+  for n in 1 2 3 4 5 6 7 8; do
+    if sudo ss -lntp 2>/dev/null | grep -E ':443\b' | grep -q haproxy; then
+      echo "ждём, пока HAProxy отпустит :443 (${n}/8)..."
+      sudo systemctl stop haproxy 2>/dev/null || true
+      sleep 1
+    else
+      break
+    fi
+  done
+  if sudo ss -lntp 2>/dev/null | grep -E ':443\b' | grep -q haproxy; then
+    _die "ROLE=backbone: :443 всё ещё у HAProxy. Подписка через Xray fallbacks не поднимется."
+  fi
+}
+
+# После старта: на backbone :443 = xray, GET подписки возвращает vless://
+assert_role_frontends() {
+  if [[ "$ROLE" != "backbone" ]]; then
+    return 0
+  fi
+  if ! systemctl is-active --quiet xray; then
+    sudo journalctl -u xray -n 40 --no-pager >&2 || true
+    _die "xray не active — https://${DOMAIN_NAME}/${SUBS_PATH}/update_subs_link не работает"
+  fi
+  if sudo ss -lntp 2>/dev/null | grep -E ':443\b' | grep -q haproxy; then
+    _die "после старта :443 снова у HAProxy"
+  fi
+  if ! sudo ss -lntp 2>/dev/null | grep -E ':443\b' | grep -q xray; then
+    sudo journalctl -u xray -n 40 --no-pager >&2 || true
+    _die "xray не слушает :443"
+  fi
+  local url code tmp
+  url="https://${DOMAIN_NAME}/${SUBS_PATH}/update_subs_link"
+  tmp="$(mktemp)"
+  code="$(curl -4sk --resolve "${DOMAIN_NAME}:443:127.0.0.1" -o "$tmp" -w '%{http_code}' --max-time 10 "$url" || true)"
+  if [[ "$code" != "200" ]] || ! grep -q '^vless://' "$tmp"; then
+    echo "HTTP ${code} с ${url} (через 127.0.0.1)" >&2
+    head -c 400 "$tmp" >&2 || true
+    echo >&2
+    rm -f "$tmp"
+    _die "подписка не отдаётся. На backbone GET /$SUBS_PATH/update_subs_link идёт в Xray fallbacks → nginx."
+  fi
+  echo "подписка отвечает: $url"
+  rm -f "$tmp"
 }

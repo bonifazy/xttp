@@ -55,9 +55,6 @@ fi
 sudo systemctl unmask nginx
 sudo systemctl enable nginx
 
-if [[ -f /etc/nginx/sites-available/default ]]; then
-  backup_if_exists /etc/nginx/sites-available/default nginx_default
-fi
 sudo mkdir -p "/var/www/html/${SUBS_PATH}"
 sudo cp "${SCRIPT_DIR}/index.html" "/var/www/html/index.html"
 sudo chown -R "${PROJECT_USER}:www-data" /var/www/html/
@@ -84,10 +81,9 @@ if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
   searxng_up
   echo ""
 else
-  # ROLE=backbone: :443 занимает Xray. Старый HAProxy/SearXNG с прошлой роли глушим.
-  if systemctl list-unit-files --type=service | grep -q '^haproxy.service'; then
-    sudo systemctl disable --now haproxy || true
-  fi
+  # ROLE=backbone: :443 — только Xray (fallbacks на nginx = подписка).
+  # Предыдущая роль edge/relay могла оставить HAProxy enabled — глушим всегда.
+  stop_haproxy_for_backbone
   searxng_stop
 fi
 
@@ -134,7 +130,7 @@ write_nginx_config
 if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
   write_haproxy_config
 fi
-write_xray_config
+write_xray_config "$UUID" "${XHTTP_PATH:-}" "${EU_UUID:-}"
 
 echo "Тест Nginx"
 sudo nginx -t
@@ -146,10 +142,14 @@ echo ""
 if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
   echo "Тест HAProxy"
   sudo haproxy -c -f "$HAPROXY_CFG"
+  sudo systemctl unmask haproxy
+  sudo systemctl enable haproxy
   sudo systemctl restart haproxy
   sleep 1
   sudo systemctl status haproxy --no-pager
   echo ""
+else
+  stop_haproxy_for_backbone
 fi
 
 echo "systemctl enable --now / restart xray"
@@ -157,6 +157,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable xray
 restart_xray
 sudo systemctl status xray --no-pager
+echo ""
+assert_role_frontends
 echo ""
 
 publish_link
