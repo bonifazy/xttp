@@ -36,5 +36,7 @@ EU_SERVER_DOMAIN="EUR_REGION.nerabotaet.com"
 EU_SERVER_PORT=8443
 
 # ── ROLE=relay и ROLE=edge (клиентская xttp-ссылка) ────────────────
-# На сервере XHTTP mode всегда auto. Здесь — что писать в ссылку.
-CLIENT_MODE="packet-up"
+# На сервере XHTTP mode всегда auto (принимает stream-up / packet-up / stream-one).
+# В ссылке — stream-up: стриминговый POST по HTTP/2 (alpn=h2), не пачка коротких POST.
+# packet-up оставляйте только если посередине CDN/прокси, который режет streaming POST.
+CLIENT_MODE="stream-up"

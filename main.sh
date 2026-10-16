@@ -8,6 +8,7 @@
 #      на EU_SERVER_PORT (часто 8443). IP этого relay есть в ALLOWED_IP на backbone
 #
 # Идемпотентно: .xttp_secrets не перезаписывает. Конфиги собирает заново.
+# ROLE=relay/edge: клиентская ссылка — XHTTP stream-up + alpn=h2 (HAProxy proto h2).
 set -euo pipefail
 
 # shellcheck disable=SC1091
