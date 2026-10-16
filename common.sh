@@ -237,13 +237,17 @@ build_vless_link() {
     echo "build_vless_link: нет XHTTP_PATH" >&2
     return 1
   fi
-  "$PYTHON" - "$uuid" "$DOMAIN_NAME" "$XHTTP_PATH" "$CLIENT_MODE" <<'PY'
+  local client_port=443
+  if [[ "$ROLE" == "edge" ]]; then
+    client_port="$EU_SERVER_PORT"
+  fi
+  "$PYTHON" - "$uuid" "$DOMAIN_NAME" "$XHTTP_PATH" "$CLIENT_MODE" "$client_port" <<'PY'
 import sys
 from urllib.parse import quote
-uuid, host, path, mode = sys.argv[1:]
+uuid, host, path, mode, port = sys.argv[1:]
 enc_path = quote(path, safe="")
 print(
-    f"vless://{uuid}@{host}:443?encryption=none&security=tls"
+    f"vless://{uuid}@{host}:{port}?encryption=none&security=tls"
     f"&sni={host}&fp=chrome&alpn=h2&type=xhttp"
     f"&path={enc_path}&mode={mode}"
 )
@@ -287,9 +291,12 @@ fetch_eu_uuid() {
 
 apply_ufw() {
   local ip
-  if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
+  if [[ "$ROLE" == "relay" ]]; then
     sudo ufw allow 80/tcp comment "HTTP redirect"
     sudo ufw allow 443/tcp comment "HTTPS"
+  elif [[ "$ROLE" == "edge" ]]; then
+    sudo ufw allow 80/tcp comment "HTTP redirect"
+    sudo ufw allow "${EU_SERVER_PORT}/tcp" comment "HTTPS"
   elif [[ "$ROLE" == "backbone" ]]; then
     sudo ufw allow "${EU_SERVER_PORT}/tcp" comment "HTTPS backbone"
   fi
@@ -521,11 +528,16 @@ write_haproxy_config() {
     echo "write_haproxy_config: нет XHTTP_PATH" >&2
     return 1
   fi
+  local tls_port=443
+  if [[ "$ROLE" == "edge" ]]; then
+    tls_port="$EU_SERVER_PORT"
+  fi
   "$PYTHON" - "/tmp/haproxy.cfg" "$DOMAIN_NAME" "$SUBS_PATH" "$XHTTP_PATH" \
     "$ALLOWED_IP" "$HAPROXY_CERT" "$XRAY_XHTTP_LISTEN" "$XRAY_XHTTP_PORT" \
-    "$NGINX_FALLBACK" "$DECOY_ADDR" <<'PY'
+    "$NGINX_FALLBACK" "$DECOY_ADDR" "$tls_port" <<'PY'
 import sys
-dst, domain, subs, xhttp, allowed, cert, xlisten, xport, nginx, decoy = sys.argv[1:]
+dst, domain, subs, xhttp, allowed, cert, xlisten, xport, nginx, decoy, tls_port = sys.argv[1:]
+tls_port = int(tls_port)
 subs_path = f"/{subs.strip('/')}/update_subs_link"
 if not xhttp.startswith("/"):
     xhttp = "/" + xhttp
@@ -535,6 +547,14 @@ use_subs = "use_backend be_subs if is_subs"
 if ips:
     acl_ok = "    acl subs_ok src " + " ".join(ips) + "\n"
     use_subs = "use_backend be_subs if is_subs subs_ok"
+bind_ssl = f"    bind :{tls_port} ssl crt {cert} alpn h2,http/1.1"
+if tls_port == 443:
+    redir = "    http-request redirect scheme https code 301 unless { ssl_fc }"
+else:
+    redir = (
+        f"    http-request redirect location https://%[hdr(host),field(1,:)]:{tls_port}%[capture.req.uri] "
+        "unless { ssl_fc }"
+    )
 cfg = f"""global
     log /dev/log local0 info
     log /dev/log local1 notice
@@ -563,10 +583,10 @@ defaults
     timeout http-request 15s
     timeout http-keep-alive 10s
 
-frontend fe443
+frontend fe_tls
     bind :80
-    bind :443 ssl crt {cert} alpn h2,http/1.1
-    http-request redirect scheme https code 301 unless {{ ssl_fc }}
+{bind_ssl}
+{redir}
     http-response set-header Strict-Transport-Security "max-age=31536000"
 
     acl is_xhttp path_beg {xhttp}

@@ -23,7 +23,7 @@ if [[ "$ROLE" == "relay" ]]; then
   echo "EU_SERVER_DOMAIN: $EU_SERVER_DOMAIN"
   echo "EU_SERVER_PORT: $EU_SERVER_PORT"
 fi
-if [[ "$ROLE" == "backbone" ]]; then
+if [[ "$ROLE" == "backbone" || "$ROLE" == "edge" ]]; then
   echo "EU_SERVER_PORT: $EU_SERVER_PORT"
 fi
 if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
