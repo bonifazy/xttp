@@ -750,6 +750,36 @@ searxng_stop() {
   fi
 }
 
+# Официальный Xray-install: бинарник + systemd unit. Повторный прогон безопасен.
+install_xray() {
+  local need=0
+  if [[ ! -x /usr/local/bin/xray ]]; then
+    need=1
+    echo "Xray не установлен. Начинаю установку..."
+  elif ! systemctl cat xray.service >/dev/null 2>&1; then
+    need=1
+    echo "Xray-бинарник есть, systemd unit нет. Ставлю unit официальным install-release.sh..."
+  else
+    echo "пакет xray уже установлен"
+  fi
+  if [[ "$need" -eq 1 ]]; then
+    echo ""
+    curl -fsSL --retry 3 -o /tmp/xray-install.sh \
+      https://github.com/XTLS/Xray-install/raw/main/install-release.sh
+    if [[ -n "${XRAY_VER:-}" ]]; then
+      sudo bash /tmp/xray-install.sh install -u nobody --version "$XRAY_VER"
+    else
+      sudo bash /tmp/xray-install.sh install -u nobody
+    fi
+    rm -f /tmp/xray-install.sh
+    sudo systemctl daemon-reload
+  fi
+  sudo xray version || sudo xray -version
+  if ! systemctl cat xray.service >/dev/null 2>&1; then
+    _die "после установки нет xray.service. Проверьте /etc/systemd/system/xray.service"
+  fi
+}
+
 restart_xray() {
   if [[ "$(id -u)" -eq 0 ]]; then
     xray run -test -config "$XRAY_CONFIG"
