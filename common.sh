@@ -750,15 +750,39 @@ searxng_stop() {
   fi
 }
 
-# Официальный Xray-install: бинарник + systemd unit. Повторный прогон безопасен.
+# Актуальный Xray-install пишет xray@.service и не всегда кладёт xray.service.
+write_xray_service_unit() {
+  sudo tee /etc/systemd/system/xray.service >/dev/null <<'EOF'
+[Unit]
+Description=Xray Service
+Documentation=https://github.com/xtls
+After=network.target nss-lookup.target
+
+[Service]
+User=nobody
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
+Restart=on-failure
+RestartPreventExitStatus=23
+LimitNPROC=10000
+LimitNOFILE=1000000
+RuntimeDirectory=xray
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  sudo systemctl daemon-reload
+}
+
+# Официальный Xray-install: бинарник. Unit xray.service дописываем сами, если его нет.
 install_xray() {
   local need=0
   if [[ ! -x /usr/local/bin/xray ]]; then
     need=1
     echo "Xray не установлен. Начинаю установку..."
-  elif ! systemctl cat xray.service >/dev/null 2>&1; then
-    need=1
-    echo "Xray-бинарник есть, systemd unit нет. Ставлю unit официальным install-release.sh..."
   else
     echo "пакет xray уже установлен"
   fi
@@ -772,11 +796,17 @@ install_xray() {
       sudo bash /tmp/xray-install.sh install -u nobody
     fi
     rm -f /tmp/xray-install.sh
-    sudo systemctl daemon-reload
   fi
   sudo xray version || sudo xray -version
+  if [[ ! -x /usr/local/bin/xray ]]; then
+    _die "после установки нет /usr/local/bin/xray"
+  fi
   if ! systemctl cat xray.service >/dev/null 2>&1; then
-    _die "после установки нет xray.service. Проверьте /etc/systemd/system/xray.service"
+    echo "нет xray.service (установщик оставил xray@.service). Пишу unit под config.json"
+    write_xray_service_unit
+  fi
+  if ! systemctl cat xray.service >/dev/null 2>&1; then
+    _die "нет xray.service после записи unit"
   fi
 }
 

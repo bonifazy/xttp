@@ -92,22 +92,7 @@ else
   searxng_stop
 fi
 
-if [[ ! -x /usr/local/bin/xray ]]; then
-  echo "Xray не установлен. Начинаю установку..."
-  echo ""
-  curl -fsSL --retry 3 -o /tmp/xray-install.sh \
-    https://github.com/XTLS/Xray-install/raw/main/install-release.sh
-  if [[ -n "${XRAY_VER:-}" ]]; then
-    sudo bash /tmp/xray-install.sh install -u nobody --version "$XRAY_VER"
-  else
-    sudo bash /tmp/xray-install.sh install -u nobody
-  fi
-  rm -f /tmp/xray-install.sh
-  sudo xray version || sudo xray -version
-else
-  echo "пакет xray уже установлен"
-  sudo xray version || sudo xray -version
-fi
+install_xray
 echo ""
 
 echo "Загрузка geoip/geosite"
