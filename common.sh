@@ -750,16 +750,20 @@ searxng_stop() {
   fi
 }
 
-# Актуальный Xray-install пишет xray@.service и не всегда кладёт xray.service.
+# Если официальный installer не положил xray.service — пишем сами под config.json.
 write_xray_service_unit() {
-  sudo tee /etc/systemd/system/xray.service >/dev/null <<'EOF'
+  local unit_user unit_group
+  unit_user="${XRAY_USER:-nobody}"
+  unit_group="${XRAY_GROUP:-nogroup}"
+  sudo tee /etc/systemd/system/xray.service >/dev/null <<EOF
 [Unit]
 Description=Xray Service
 Documentation=https://github.com/xtls
 After=network.target nss-lookup.target
 
 [Service]
-User=nobody
+User=${unit_user}
+Group=${unit_group}
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
@@ -777,6 +781,18 @@ EOF
   sudo systemctl daemon-reload
 }
 
+# Новый Xray-install больше не принимает -u nobody: сервис от пользователя xray.
+adopt_xray_runtime_user() {
+  if id -u xray >/dev/null 2>&1; then
+    XRAY_USER=xray
+    XRAY_GROUP=xray
+  fi
+  if [[ -f "${SSL_DIR}/cert.key" ]]; then
+    sudo chown root:"${XRAY_GROUP}" "${SSL_DIR}/cert.key"
+    sudo chmod 640 "${SSL_DIR}/cert.key"
+  fi
+}
+
 # Официальный Xray-install: бинарник. Unit xray.service дописываем сами, если его нет.
 install_xray() {
   local need=0
@@ -791,9 +807,9 @@ install_xray() {
     curl -fsSL --retry 3 -o /tmp/xray-install.sh \
       https://github.com/XTLS/Xray-install/raw/main/install-release.sh
     if [[ -n "${XRAY_VER:-}" ]]; then
-      sudo bash /tmp/xray-install.sh install -u nobody --version "$XRAY_VER"
+      sudo bash /tmp/xray-install.sh install --version "$XRAY_VER"
     else
-      sudo bash /tmp/xray-install.sh install -u nobody
+      sudo bash /tmp/xray-install.sh install
     fi
     rm -f /tmp/xray-install.sh
   fi
@@ -801,13 +817,58 @@ install_xray() {
   if [[ ! -x /usr/local/bin/xray ]]; then
     _die "после установки нет /usr/local/bin/xray"
   fi
+  adopt_xray_runtime_user
   if ! systemctl cat xray.service >/dev/null 2>&1; then
-    echo "нет xray.service (установщик оставил xray@.service). Пишу unit под config.json"
+    echo "нет xray.service. Пишу unit под config.json (User=${XRAY_USER})"
     write_xray_service_unit
   fi
   if ! systemctl cat xray.service >/dev/null 2>&1; then
     _die "нет xray.service после записи unit"
   fi
+  grant_project_user_admins
+}
+
+# PROJECT_USER администрирует сервис, процесс xray остаётся от xray/nobody.
+# docker: группа docker. xray: NOPASSWD systemctl/journalctl только для xray.service.
+grant_project_user_admins() {
+  if ! id -u "$PROJECT_USER" >/dev/null 2>&1; then
+    echo "нет пользователя ${PROJECT_USER}, права docker/xray не выдаю" >&2
+    return 0
+  fi
+  if getent group docker >/dev/null 2>&1; then
+    sudo usermod -aG docker "$PROJECT_USER"
+    echo "${PROJECT_USER} в группе docker"
+  fi
+  local tmp sudoers
+  tmp="$(mktemp)"
+  sudoers=/etc/sudoers.d/xttp-xray
+  cat > "$tmp" <<EOF
+# xttp: ${PROJECT_USER} управляет xray.service без пароля.
+Cmnd_Alias XTTP_XRAY = \\
+  /usr/bin/systemctl start xray, /usr/bin/systemctl start xray.service, \\
+  /usr/bin/systemctl stop xray, /usr/bin/systemctl stop xray.service, \\
+  /usr/bin/systemctl restart xray, /usr/bin/systemctl restart xray.service, \\
+  /usr/bin/systemctl reload xray, /usr/bin/systemctl reload xray.service, \\
+  /usr/bin/systemctl status xray, /usr/bin/systemctl status xray *, \\
+  /usr/bin/systemctl status xray.service, /usr/bin/systemctl status xray.service *, \\
+  /usr/bin/systemctl is-active xray, /usr/bin/systemctl is-active xray.service, \\
+  /usr/bin/systemctl enable xray, /usr/bin/systemctl enable xray.service, \\
+  /usr/bin/systemctl disable xray, /usr/bin/systemctl disable xray.service, \\
+  /usr/bin/systemctl kill xray, /usr/bin/systemctl kill xray.service, \\
+  /usr/bin/systemctl reset-failed xray, /usr/bin/systemctl reset-failed xray.service, \\
+  /usr/bin/journalctl -u xray, /usr/bin/journalctl -u xray *, \\
+  /usr/bin/journalctl -u xray.service, /usr/bin/journalctl -u xray.service *, \\
+  /usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json, \\
+  /usr/local/bin/xray version
+${PROJECT_USER} ALL=(root) NOPASSWD: XTTP_XRAY
+EOF
+  if visudo -cf "$tmp" >/dev/null 2>&1; then
+    sudo install -o root -g root -m 440 "$tmp" "$sudoers"
+    echo "${PROJECT_USER}: NOPASSWD systemctl/journalctl для xray.service"
+  else
+    echo "sudoers ${sudoers} невалиден, не ставлю" >&2
+  fi
+  rm -f "$tmp"
 }
 
 restart_xray() {

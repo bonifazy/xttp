@@ -83,6 +83,7 @@ if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
     sudo apt-get install -y docker-compose-v2 || sudo apt-get install -y docker-compose || true
   fi
   sudo systemctl enable --now docker
+  grant_project_user_admins
   searxng_up
   echo ""
 else
