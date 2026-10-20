@@ -22,6 +22,7 @@ BACKUP_DIR="${BACKUP_DIR:-/home/${PROJECT_USER}/backup}"
 SSL_DIR="${SSL_DIR:-/etc/ssl/nerabotaet.com}"
 XRAY_CONFIG="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
 GEODATA_DIR="${GEODATA_DIR:-/usr/local/share/xray}"
+GEODATA_BUNDLE="${GEODATA_BUNDLE:-${SCRIPT_DIR}/geodata}"
 HAPROXY_CFG="${HAPROXY_CFG:-/etc/haproxy/haproxy.cfg}"
 HAPROXY_CERT="${HAPROXY_CERT:-/etc/haproxy/certs/nerabotaet.com.pem}"
 NGINX_SITE="${NGINX_SITE:-/etc/nginx/sites-available/default}"
@@ -386,18 +387,73 @@ apply_ufw() {
   fi
 }
 
+_geodata_file_ok() {
+  local f="$1"
+  [[ -f "$f" ]] && [[ "$(stat -c%s "$f" 2>/dev/null || echo 0)" -gt 1000 ]]
+}
+
+# 1) GitHub 10 с  2) зеркала jsDelivr / Fastly  3) иначе локальные geodata/ из репозитория.
+_fetch_geodat() {
+  local dest="$1"
+  local github="$2"
+  shift 2
+  echo "  1) GitHub (10s): ${github}"
+  if curl -4fsSL --connect-timeout 10 --max-time 10 --retry 0 -o "$dest" "$github" \
+    && _geodata_file_ok "$dest"; then
+    echo "  ок GitHub"
+    return 0
+  fi
+  rm -f "$dest"
+  echo "  GitHub не успел за 10с"
+  local url
+  for url in "$@"; do
+    echo "  2) зеркало: ${url}"
+    if curl -4fsSL --connect-timeout 10 --max-time 60 --retry 0 -o "$dest" "$url" \
+      && _geodata_file_ok "$dest"; then
+      echo "  ок зеркало"
+      return 0
+    fi
+    rm -f "$dest"
+  done
+  echo "  зеркала не дали файл"
+  return 1
+}
+
+# Только после провала GitHub и зеркал: файлы из ~/xttp/geodata.
+_geodata_fallback() {
+  local name="$1" dest="$2"
+  if _geodata_file_ok "${GEODATA_BUNDLE}/${name}"; then
+    echo "  3) локальный ${GEODATA_BUNDLE}/${name}"
+    cp -a "${GEODATA_BUNDLE}/${name}" "$dest"
+    return 0
+  fi
+  echo "нет ${GEODATA_BUNDLE}/${name} после GitHub и зеркал" >&2
+  return 1
+}
+
 install_geodata() {
   local tmp
   tmp="$(mktemp -d)"
-  echo "curl geoip.dat / geosite.dat (Loyalsoldier)"
-  curl -fsSL --retry 3 --retry-delay 2 -o "${tmp}/geoip.dat" \
-    https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
-  curl -fsSL --retry 3 --retry-delay 2 -o "${tmp}/geosite.dat" \
-    https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
-  if [[ "$(stat -c%s "${tmp}/geoip.dat")" -le 1000 || "$(stat -c%s "${tmp}/geosite.dat")" -le 1000 ]]; then
-    echo "Слишком маленький geoip/geosite" >&2
-    rm -rf "$tmp"
-    return 1
+  echo "geoip/geosite: GitHub → зеркало → локальные geodata/"
+  if ! _fetch_geodat "${tmp}/geoip.dat" \
+    "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" \
+    "https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat" \
+    "https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat"
+  then
+    if ! _geodata_fallback geoip.dat "${tmp}/geoip.dat"; then
+      rm -rf "$tmp"
+      return 1
+    fi
+  fi
+  if ! _fetch_geodat "${tmp}/geosite.dat" \
+    "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" \
+    "https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat" \
+    "https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat"
+  then
+    if ! _geodata_fallback geosite.dat "${tmp}/geosite.dat"; then
+      rm -rf "$tmp"
+      return 1
+    fi
   fi
   sudo mkdir -p "$GEODATA_DIR"
   sudo install -o root -g root -m 644 "${tmp}/geoip.dat" "${GEODATA_DIR}/geoip.dat"
