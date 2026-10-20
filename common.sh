@@ -48,6 +48,7 @@ DOMAIN_NAME="${DOMAIN_NAME:-}"
 SUBS_PATH="${SUBS_PATH:-}"
 ALLOWED_IP="${ALLOWED_IP:-}"
 EU_SERVER_DOMAIN="${EU_SERVER_DOMAIN:-}"
+EU_SERVER_LINK="${EU_SERVER_LINK:-}"
 CLIENT_MODE="${CLIENT_MODE:-stream-up}"
 EU_SNI="${EU_SERVER_DOMAIN}"
 
@@ -107,8 +108,8 @@ if [[ -z "$DOMAIN_NAME" || -z "$SUBS_PATH" || -z "$ALLOWED_IP" ]]; then
   _die "В .env пусты DOMAIN_NAME, SUBS_PATH или ALLOWED_IP"
 fi
 
-if [[ "$ROLE" == "relay" && -z "$EU_SERVER_DOMAIN" ]]; then
-  _die "ROLE=relay требует EU_SERVER_DOMAIN в .env"
+if [[ "$ROLE" == "relay" && -z "$EU_SERVER_LINK" && -z "$EU_SERVER_DOMAIN" ]]; then
+  _die "ROLE=relay требует EU_SERVER_LINK или EU_SERVER_DOMAIN в .env"
 fi
 
 if [[ ! "$EU_SERVER_PORT" =~ ^[0-9]+$ ]] || [[ "$EU_SERVER_PORT" -lt 1 || "$EU_SERVER_PORT" -gt 65535 ]]; then
@@ -284,6 +285,63 @@ parse_vless_uuid() {
     return 1
   fi
   printf '%s\n' "$uuid"
+}
+
+# EU_SERVER_LINK → EU_UUID, EU_SERVER_DOMAIN, EU_SERVER_PORT, EU_SNI.
+apply_eu_server_link() {
+  local link parsed
+  link="$(printf '%s' "${1:-${EU_SERVER_LINK:-}}" | tr -d '\r\n ')"
+  if [[ "$link" != vless://* ]]; then
+    echo "EU_SERVER_LINK должна начинаться с vless://" >&2
+    return 1
+  fi
+  parsed="$("$PYTHON" - "$link" <<'PY'
+import re
+import sys
+from urllib.parse import parse_qs, unquote, urlparse
+
+raw = sys.argv[1]
+u = urlparse(raw)
+uuid = u.username or ""
+host = u.hostname or ""
+port = u.port
+qs = parse_qs(u.query, keep_blank_values=False)
+sni = unquote((qs.get("sni") or [host])[0] or "")
+if not uuid or not host:
+    sys.stderr.write("EU_SERVER_LINK: нет UUID или хоста\n")
+    sys.exit(1)
+if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", uuid):
+    sys.stderr.write("EU_SERVER_LINK: UUID не разобрать\n")
+    sys.exit(1)
+if port is None:
+    port = 443
+if not 1 <= int(port) <= 65535:
+    sys.stderr.write("EU_SERVER_LINK: плохой порт\n")
+    sys.exit(1)
+if not sni:
+    sni = host
+print(f"EU_UUID={uuid}")
+print(f"EU_SERVER_DOMAIN={host}")
+print(f"EU_SERVER_PORT={port}")
+print(f"EU_SNI={sni}")
+PY
+)" || return 1
+  eval "$parsed"
+  if [[ -z "${EU_UUID:-}" || -z "${EU_SERVER_DOMAIN:-}" ]]; then
+    echo "EU_SERVER_LINK не разобралась" >&2
+    return 1
+  fi
+}
+
+# Для relay: постоянная EU_SERVER_LINK или GET подписки с backbone.
+# Ставит EU_UUID (и из ссылки — DOMAIN/PORT/SNI) в текущем shell, не в $().
+resolve_relay_eu_uuid() {
+  if [[ -n "${EU_SERVER_LINK:-}" ]]; then
+    echo "EU_UUID из EU_SERVER_LINK, подписку backbone не запрашиваем"
+    apply_eu_server_link || return 1
+    return 0
+  fi
+  EU_UUID="$(fetch_eu_uuid)" || return 1
 }
 
 # Качает подписку с backbone. Пишет UUID в stdout. При ошибке — подробности в stderr.

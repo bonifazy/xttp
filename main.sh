@@ -4,8 +4,8 @@
 #   1. .env из env_markup — ROLE и переменные для этой роли
 #   2. Сертификаты в /tmp/fullchain.crt и /tmp/cert.key (или уже в SSL_DIR)
 #   3. DNS DOMAIN_NAME смотрит на этот VPS
-#   4. ROLE=relay: парный backbone уже отдаёт /$SUBS_PATH/update_subs_link
-#      на EU_SERVER_PORT (часто 8443). IP этого relay есть в ALLOWED_IP на backbone
+#   4. ROLE=relay: в .env EU_SERVER_LINK = постоянная vless-ссылка backbone.
+#      Если пусто — качаем /$SUBS_PATH/update_subs_link (IP relay в ALLOWED_IP).
 #
 # Идемпотентно: .xttp_secrets не перезаписывает. Конфиги собирает заново.
 # ROLE=relay/edge: клиентская ссылка — XHTTP stream-up + alpn=h2 (HAProxy proto h2).
@@ -20,6 +20,9 @@ echo "DOMAIN_NAME: $DOMAIN_NAME"
 echo "SUBS_PATH: $SUBS_PATH"
 echo "ALLOWED_IP: $ALLOWED_IP"
 if [[ "$ROLE" == "relay" ]]; then
+  if [[ -n "${EU_SERVER_LINK:-}" ]]; then
+    echo "EU_SERVER_LINK: задана"
+  fi
   echo "EU_SERVER_DOMAIN: $EU_SERVER_DOMAIN"
   echo "EU_SERVER_PORT: $EU_SERVER_PORT"
 fi
@@ -102,12 +105,13 @@ if [[ -n "${XHTTP_PATH:-}" ]]; then
   echo "XHTTP_PATH: $XHTTP_PATH"
 fi
 
-# ROLE=relay: EU_UUID с backbone ДО записи рабочего конфига Xray.
+# ROLE=relay: EU_UUID из EU_SERVER_LINK или с подписки backbone, ДО рабочего конфига.
 if [[ "$ROLE" == "relay" ]]; then
   echo ""
-  EU_UUID="$(fetch_eu_uuid)"
+  resolve_relay_eu_uuid
   write_secrets
-  echo "EU_UUID получен"
+  echo "EU_UUID: $EU_UUID"
+  echo "EU outbound: ${EU_SERVER_DOMAIN}:${EU_SERVER_PORT} sni=${EU_SNI}"
 fi
 
 backup_if_exists "$XRAY_CONFIG" xray_config.json
@@ -173,12 +177,12 @@ add_cron "0 6 * * 1 ${SCRIPT_DIR}/update_geodata.sh" "update_geodata.sh"
 add_cron "58 23 * * * truncate -s 0 /var/log/nginx/access.log /var/log/nginx/error.log /var/log/haproxy.log 2>/dev/null || true" "/var/log/nginx/access.log"
 add_cron "59 23 * * * ${SCRIPT_DIR}/clear_xray_logs.sh" "clear_xray_logs.sh"
 
+current="$(sudo crontab -l 2>/dev/null || true)"
+current="$(printf '%s\n' "$current" \
+  | grep -vF "change_uuid.sh" \
+  | grep -vF "Ротация XTTP UUID для edge EU сервера" \
+  | grep -v '^$' || true)"
 if [[ "$ROLE" == "edge" ]]; then
-  current="$(sudo crontab -l 2>/dev/null || true)"
-  current="$(printf '%s\n' "$current" \
-    | grep -vF "change_uuid.sh" \
-    | grep -vF "Ротация XTTP UUID для edge EU сервера" \
-    | grep -v '^$' || true)"
   printf '%s\n' \
     "$current" \
     "# Ротация XTTP UUID для edge EU сервера" \
@@ -186,6 +190,9 @@ if [[ "$ROLE" == "edge" ]]; then
     | grep -v '^$' | sudo crontab -
   echo "Cron: change_uuid.sh (edge)"
   echo "1 0 3,7,13,17,23,27 * * ${SCRIPT_DIR}/change_uuid.sh"
+else
+  printf '%s\n' "$current" | grep -v '^$' | sudo crontab - || true
+  echo "Cron: change_uuid.sh снят (ROLE=${ROLE}, ротации UUID нет)"
 fi
 
 echo "Файл подписки:"

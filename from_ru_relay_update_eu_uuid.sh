@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Только ROLE=relay. Тянет UUID магистрали с backbone и кладёт в .xttp_secrets.
+# Только ROLE=relay. EU_UUID из EU_SERVER_LINK или с подписки backbone.
 # Если рабочий конфиг Xray уже есть — пересобирает его и рестартует.
 # shellcheck disable=SC1091
 source /home/dim/xttp/common.sh
@@ -11,7 +11,7 @@ if [[ "$ROLE" != "relay" ]]; then
   exit 1
 fi
 
-EU_UUID="$(fetch_eu_uuid)"
+resolve_relay_eu_uuid
 write_secrets
 echo "EU_UUID=${EU_UUID}"
 

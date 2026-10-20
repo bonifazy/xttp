@@ -27,15 +27,23 @@ SUBS_PATH="uuid-каталог-подписки"
 ALLOWED_IP="1.2.3.4"
 
 # ── ROLE=relay, ROLE=backbone и ROLE=edge ──────────────────────────
-# Имя парного backbone (только relay). SNI и flow=xtls-rprx-vision — в коде.
+# Имя парного backbone (только relay, если нет EU_SERVER_LINK).
+# SNI и flow=xtls-rprx-vision — в коде, либо из EU_SERVER_LINK.
 EU_SERVER_DOMAIN="EUR_REGION.nerabotaet.com"
 
 # Порт туннеля. Если не задан — 443.
 # backbone: Xray VLESS+TLS и URL подписки
-# relay:    outbound на backbone (клиенты по-прежнему стучатся на :443)
+# relay:    outbound на backbone (клиенты по-прежнему стучатся на :443);
+#           при EU_SERVER_LINK порт берётся из ссылки
 # edge:     HAProxy TLS и порт в клиентской xttp-ссылке
 # С RU ALPN на :443 часто режут — тогда 8443.
 EU_SERVER_PORT=8443
+
+# ROLE=relay: постоянная vless-ссылка backbone (как отдаёт подписка).
+# Если задана — ./main.sh не качает /$SUBS_PATH/update_subs_link.
+# Из ссылки: UUID, хост, порт, SNI. EU_SERVER_DOMAIN/PORT тогда не обязательны.
+# EU_SERVER_LINK="vless://uuid@eu.nerabotaet.com:8443?type=tcp&encryption=none&flow=xtls-rprx-vision&security=tls&sni=eu.nerabotaet.com&fp=chrome&alpn=http%2F1.1"
+EU_SERVER_LINK=""
 
 # ── ROLE=relay и ROLE=edge (клиентская xttp-ссылка) ────────────────
 # На сервере XHTTP mode всегда auto (принимает stream-up / packet-up / stream-one).
