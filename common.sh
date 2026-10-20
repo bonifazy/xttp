@@ -770,7 +770,8 @@ searxng_stop() {
   fi
 }
 
-# Если официальный installer не положил xray.service — пишем сами под config.json.
+# Всегда unit + drop-in 99-xttp: старый installer/ручной ~/xray/config.json
+# перекрывается 10-donot_touch_single_conf.conf, его 99-xttp побеждает.
 write_xray_service_unit() {
   local unit_user unit_group
   unit_user="${XRAY_USER:-nobody}"
@@ -787,7 +788,7 @@ Group=${unit_group}
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
-ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
+ExecStart=/usr/local/bin/xray run -config ${XRAY_CONFIG}
 Restart=on-failure
 RestartPreventExitStatus=23
 LimitNPROC=10000
@@ -798,15 +799,28 @@ RuntimeDirectoryMode=0755
 [Install]
 WantedBy=multi-user.target
 EOF
+  sudo mkdir -p /etc/systemd/system/xray.service.d
+  sudo tee /etc/systemd/system/xray.service.d/99-xttp.conf >/dev/null <<EOF
+[Service]
+User=${unit_user}
+Group=${unit_group}
+ExecStart=
+ExecStart=/usr/local/bin/xray run -config ${XRAY_CONFIG}
+EOF
   sudo systemctl daemon-reload
 }
 
-# Новый Xray-install больше не принимает -u nobody: сервис от пользователя xray.
+# Процесс Xray — от пользователя xray (не PROJECT_USER). systemd не любит User=nobody.
 adopt_xray_runtime_user() {
-  if id -u xray >/dev/null 2>&1; then
-    XRAY_USER=xray
-    XRAY_GROUP=xray
+  if ! getent group xray >/dev/null 2>&1; then
+    sudo groupadd --system xray
   fi
+  if ! id -u xray >/dev/null 2>&1; then
+    sudo useradd --system --gid xray --no-create-home --home-dir /nonexistent \
+      --shell /usr/sbin/nologin --comment "Xray Service" xray
+  fi
+  XRAY_USER=xray
+  XRAY_GROUP=xray
   if [[ -f "${SSL_DIR}/cert.key" ]]; then
     sudo chown root:"${XRAY_GROUP}" "${SSL_DIR}/cert.key"
     sudo chmod 640 "${SSL_DIR}/cert.key"
@@ -838,10 +852,8 @@ install_xray() {
     _die "после установки нет /usr/local/bin/xray"
   fi
   adopt_xray_runtime_user
-  if ! systemctl cat xray.service >/dev/null 2>&1; then
-    echo "нет xray.service. Пишу unit под config.json (User=${XRAY_USER})"
-    write_xray_service_unit
-  fi
+  echo "xray.service -> ${XRAY_CONFIG} (User=${XRAY_USER})"
+  write_xray_service_unit
   if ! systemctl cat xray.service >/dev/null 2>&1; then
     _die "нет xray.service после записи unit"
   fi
@@ -939,6 +951,14 @@ assert_role_frontends() {
   if sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q haproxy; then
     _die "после старта :${EU_SERVER_PORT} снова у HAProxy"
   fi
+  local n
+  for n in 1 2 3 4 5 6 7 8 9 10; do
+    if sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q xray; then
+      break
+    fi
+    echo "ждём, пока xray откроет :${EU_SERVER_PORT} (${n}/10)..."
+    sleep 1
+  done
   if ! sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q xray; then
     sudo journalctl -u xray -n 40 --no-pager >&2 || true
     _die "xray не слушает :${EU_SERVER_PORT}"
