@@ -78,6 +78,26 @@ wait_for_apt() {
   done
 }
 
+# apt-get update/install только если пакета нет в dpkg.
+ensure_apt_packages() {
+  local missing=()
+  local p status
+  for p in "$@"; do
+    status="$(dpkg-query -W -f='${db:Status-Status}' "$p" 2>/dev/null || true)"
+    if [[ "$status" != "installed" ]]; then
+      missing+=("$p")
+    fi
+  done
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    return 0
+  fi
+  echo "Установка ${missing[*]}"
+  wait_for_apt
+  sudo apt-get update
+  wait_for_apt
+  sudo apt-get install -y "${missing[@]}"
+}
+
 case "$ROLE" in
   relay|edge|backbone) ;;
   *) _die "ROLE должен быть relay, edge или backbone. Сейчас: '${ROLE}'" ;;

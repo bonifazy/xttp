@@ -31,11 +31,7 @@ if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
 fi
 echo ""
 
-echo "Установка python3 curl"
-wait_for_apt
-sudo apt-get update
-wait_for_apt
-sudo apt-get install -y python3 curl ca-certificates
+ensure_apt_packages python3 curl ca-certificates
 "$PYTHON" --version
 echo ""
 
