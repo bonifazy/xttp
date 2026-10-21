@@ -684,15 +684,32 @@ write_haproxy_config() {
     return 1
   fi
   local tls_port=443
+  local h2_fe_be=0
+  local hap_ver hap_maj hap_min
   if [[ "$ROLE" == "edge" || "$ROLE" == "backbone" ]]; then
     tls_port="$EU_SERVER_PORT"
   fi
+  # 2.4 (Ubuntu 22.04): tune.h2.initial-window-size. 2.6+: fe/be.
+  hap_ver="$(haproxy -v 2>/dev/null | awk 'NR==1 { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+/) { print $i; exit } }')"
+  hap_ver="${hap_ver%%-*}"
+  hap_maj="${hap_ver%%.*}"
+  hap_min="${hap_ver#*.}"; hap_min="${hap_min%%.*}"
+  if [[ "${hap_maj:-0}" -gt 2 ]] || { [[ "${hap_maj:-0}" -eq 2 ]] && [[ "${hap_min:-0}" -ge 6 ]]; }; then
+    h2_fe_be=1
+  fi
   "$PYTHON" - "/tmp/haproxy.cfg" "$DOMAIN_NAME" "$SUBS_PATH" "$XHTTP_PATH" \
     "$ALLOWED_IP" "$HAPROXY_CERT" "$XRAY_XHTTP_LISTEN" "$XRAY_XHTTP_PORT" \
-    "$NGINX_FALLBACK" "$DECOY_ADDR" "$tls_port" <<'PY'
+    "$NGINX_FALLBACK" "$DECOY_ADDR" "$tls_port" "$h2_fe_be" <<'PY'
 import sys
-dst, domain, subs, xhttp, allowed, cert, xlisten, xport, nginx, decoy, tls_port = sys.argv[1:]
+dst, domain, subs, xhttp, allowed, cert, xlisten, xport, nginx, decoy, tls_port, h2_fe_be = sys.argv[1:]
 tls_port = int(tls_port)
+if h2_fe_be == "1":
+    h2_window = (
+        "    tune.h2.fe.initial-window-size 1048576\n"
+        "    tune.h2.be.initial-window-size 1048576"
+    )
+else:
+    h2_window = "    tune.h2.initial-window-size 1048576"
 subs_path = f"/{subs.strip('/')}/update_subs_link"
 if not xhttp.startswith("/"):
     xhttp = "/" + xhttp
@@ -721,8 +738,7 @@ cfg = f"""global
     daemon
     maxconn 20000
     ssl-default-bind-options ssl-min-ver TLSv1.2 prefer-client-ciphers no-tls-tickets
-    tune.h2.fe.initial-window-size 1048576
-    tune.h2.be.initial-window-size 1048576
+{h2_window}
     # telemt #844: большие TLS-записи на потоке; мелкий maxrecord = MSS на всю сессию.
     tune.ssl.maxrecord 16384
 
