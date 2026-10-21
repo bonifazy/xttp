@@ -1021,7 +1021,7 @@ install_xray() {
     sudo mkdir -p /usr/local/share/xray
     echo "${tag} hello-frag ${arch}" | sudo tee "$stamp" >/dev/null
   fi
-  sudo xray version || sudo xray -version
+  sudo /usr/local/bin/xray version || sudo /usr/local/bin/xray -version
   if [[ ! -x /usr/local/bin/xray ]]; then
     _die "после установки нет /usr/local/bin/xray"
   fi
@@ -1082,11 +1082,11 @@ EOF
 
 restart_xray() {
   if [[ "$(id -u)" -eq 0 ]]; then
-    xray run -test -config "$XRAY_CONFIG"
+    /usr/local/bin/xray run -test -config "$XRAY_CONFIG"
     systemctl reset-failed xray 2>/dev/null || true
     systemctl restart xray
   else
-    sudo xray run -test -config "$XRAY_CONFIG"
+    sudo /usr/local/bin/xray run -test -config "$XRAY_CONFIG"
     sudo systemctl reset-failed xray 2>/dev/null || true
     sudo systemctl restart xray
   fi
