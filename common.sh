@@ -507,7 +507,6 @@ publish_link() {
   build_vless_link "$UUID" | sudo tee "$LINK_FILE" >/dev/null
   sudo chown -R "${PROJECT_USER}:www-data" /var/www/html/
   sudo chmod 644 "$LINK_FILE"
-  echo "Файл подписки: $LINK_FILE"
 }
 
 # Собирает /usr/local/etc/xray/config.json. В xhttpSettings только path и mode.

@@ -160,7 +160,6 @@ assert_role_frontends
 echo ""
 
 publish_link
-sudo file "$LINK_FILE"
 echo ""
 
 chmod +x "${SCRIPT_DIR}/"*.sh
@@ -204,5 +203,14 @@ else
   echo "Cron: change_uuid_and_path.sh снят (ROLE=${ROLE}, ротации UUID/XHTTP_PATH нет)"
 fi
 
-echo "Файл подписки:"
-echo "$LINK_FILE"
+subs_port=443
+if [[ "$ROLE" == "edge" || "$ROLE" == "backbone" ]]; then
+  subs_port="$EU_SERVER_PORT"
+fi
+subs_url="$(https_url "$DOMAIN_NAME" "${SUBS_PATH}/update_subs_link" "$subs_port")"
+echo "Файл подписки: $LINK_FILE"
+echo "Ссылка:"
+sudo cat "$LINK_FILE"
+echo ""
+echo "Тест с локального компьютера:"
+echo "curl -fsS '${subs_url}'"
