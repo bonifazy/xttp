@@ -1,52 +1,40 @@
-# Скопируйте в .env и заполните строки для СВОЕЙ роли.
-# ROLE=relay     — RU-мост: HAProxy :443 → XHTTP → VLESS RAW+TLS на backbone
-# ROLE=edge      — одиночный EU для клиентов: HAProxy :EU_SERVER_PORT XHTTP → freedom
-# ROLE=backbone  — EU-магистраль: Xray :EU_SERVER_PORT VLESS RAW+TLS, принимает relay
+# Скопируйте в .env и заполните строки для своей роли.
+# relay — RU: телефон → HAProxy :443 XHTTP → backbone packet-up
+# edge — EU для клиентов: HAProxy :EU_SERVER_PORT XHTTP → freedom
+# backbone — EU: HAProxy :EU_SERVER_PORT, принимает relay
+#
+# XHTTP: packet-up — hop/CDN; stream-up — телефон напрямую; auto — inbound.
+# stream-one не используем (Vision). Паддинг ядро ставит само.
 
 ROLE="edge"
 
-# ── Все роли ───────────────────────────────────────────────────────
-# Имя ЭТОГО сервера (SAN wildcard-сертификата, SNI, хост в ссылке).
-# relay:    ru1.nerabotaet.com  — куда стучится клиент
-# edge:     eu1.nerabotaet.com  — куда стучится клиент
-# backbone: eu1.nerabotaet.com  — куда стучится relay
-#           (это же значение EU_SERVER_DOMAIN на стороне парного relay)
+# Имя этого сервера (SNI, хост в ссылке). На парном relay — EU_SERVER_DOMAIN.
 DOMAIN_NAME="REGION.nerabotaet.com"
 
-# Каталог статического файла подписки: /$SUBS_PATH/update_subs_link
-# relay/edge:  xttp-ссылка для вашего RestAPI (не для конечных клиентов)
-# backbone:    vless RAW+TLS-ссылка, которую relay забирает
-#              скриптом from_ru_relay_update_eu_uuid.sh
+# Каталог /$SUBS_PATH/update_subs_link
 SUBS_PATH="uuid-каталог-подписки"
 
-# IP через пробел. Подписка отдаётся только им, остальным — как будто пути нет.
-# ufw: на каждый IP — allow from <ip> comment "All from allowed_ip" (все порты).
-# "*" — подписка открыта всем. ufw на backbone/edge открывает EU_SERVER_PORT.
-# relay/edge: IP вашего RestAPI
-# backbone:   IP парного relay
+# IP через пробел: подписка только им + ufw allow from (все порты).
+# Пусто — main.sh не падает, ufw from нет, подписка без ACL. "*" — всем, ufw from нет.
 ALLOWED_IP="1.2.3.4"
 
-# ── ROLE=relay, ROLE=backbone и ROLE=edge ──────────────────────────
-# Имя парного backbone (только relay, если нет EU_SERVER_LINK).
-# SNI и flow=xtls-rprx-vision — в коде, либо из EU_SERVER_LINK.
+# Парный backbone (relay, если нет EU_SERVER_LINK).
 EU_SERVER_DOMAIN="EUR_REGION.nerabotaet.com"
 
-# Порт туннеля. Если не задан — 443.
-# backbone: Xray VLESS+TLS и URL подписки
-# relay:    outbound на backbone (клиенты по-прежнему стучатся на :443);
-#           при EU_SERVER_LINK порт берётся из ссылки
-# edge:     HAProxy TLS и порт в клиентской xttp-ссылке
-# С RU ALPN на :443 часто режут — тогда 8443.
+# Порт туннеля, иначе 443. С RU на :443 часто режут — тогда 8443.
 EU_SERVER_PORT=8443
 
-# ROLE=relay: постоянная vless-ссылка backbone (как отдаёт подписка).
-# Если задана — ./main.sh не качает /$SUBS_PATH/update_subs_link.
-# Из ссылки: UUID, хост, порт, SNI. EU_SERVER_DOMAIN/PORT тогда не обязательны.
-# EU_SERVER_LINK="vless://uuid@eu.nerabotaet.com:8443?type=tcp&encryption=none&flow=xtls-rprx-vision&security=tls&sni=eu.nerabotaet.com&fp=chrome&alpn=http%2F1.1"
+# Hop relay→backbone. По умолчанию packet-up.
+# EU_XHTTP_MODE="packet-up"
+
+# #844: на hop RU→EU режем только TLS ClientHello (патч в бинарнике с Mac). 0 — выключить.
+# HELLO_FRAG=1
+# HELLO_FRAG_LENGTH="80-120"
+# HELLO_FRAG_INTERVAL="8-20"
+
+# Relay: постоянная vless-ссылка backbone. Если задана — подписку не качаем.
+# EU_SERVER_LINK="vless://uuid@eu.nerabotaet.com:8443?encryption=none&security=tls&sni=eu.nerabotaet.com&fp=chrome&alpn=h2&type=xhttp&path=%2Fsecret&mode=packet-up"
 EU_SERVER_LINK=""
 
-# ── ROLE=relay и ROLE=edge (клиентская xttp-ссылка) ────────────────
-# На сервере XHTTP mode всегда auto (принимает stream-up / packet-up / stream-one).
-# В ссылке — stream-up: стриминговый POST по HTTP/2 (alpn=h2), не пачка коротких POST.
-# packet-up оставляйте только если посередине CDN/прокси, который режет streaming POST.
+# Ссылка клиенту: stream-up. packet-up только если посередине CDN.
 CLIENT_MODE="stream-up"

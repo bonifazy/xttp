@@ -3,3 +3,12 @@
 .idea/
 *.log
 searxng/.env
+.gopath/
+.gocache/
+.goroot/
+# Сырое ядро Xray не в git. В репозитории только linux-релиз с hello_frag.
+xray-core/*
+!xray-core/xray-linux-amd64
+!xray-core/xray-linux-arm64
+!xray-core/xray-linux.BUILD
+!xray-core/XTLS_TAG

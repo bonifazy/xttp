@@ -4,11 +4,15 @@
 #   1. .env из env_markup — ROLE и переменные для этой роли
 #   2. Сертификаты в /tmp/fullchain.crt и /tmp/cert.key (или уже в SSL_DIR)
 #   3. DNS DOMAIN_NAME смотрит на этот VPS
-#   4. ROLE=relay: в .env EU_SERVER_LINK = постоянная vless-ссылка backbone.
-#      Если пусто — качаем /$SUBS_PATH/update_subs_link (IP relay в ALLOWED_IP).
+#   4. ROLE=relay: в .env EU_SERVER_LINK = постоянная vless-ссылка backbone
+#      (XHTTP packet-up). Если пусто — качаем /$SUBS_PATH/update_subs_link
+#      (IP relay в ALLOWED_IP).
 #
 # Идемпотентно: .xttp_secrets не перезаписывает. Конфиги собирает заново.
 # ROLE=relay/edge: клиентская ссылка — XHTTP stream-up + alpn=h2 (HAProxy proto h2).
+# ROLE=backbone: ссылка для relay — XHTTP packet-up; снаружи HAProxy+SearXNG.
+# Xray: готовый ELF из xray-core/xray-linux-* (сборка на Mac: ./build_xray_release.sh).
+# Патч hello_frag внутри бинарника. С GitHub/Xray-install не качаем.
 set -euo pipefail
 
 # shellcheck disable=SC1091
@@ -18,7 +22,11 @@ echo ""
 echo "ROLE: $ROLE"
 echo "DOMAIN_NAME: $DOMAIN_NAME"
 echo "SUBS_PATH: $SUBS_PATH"
-echo "ALLOWED_IP: $ALLOWED_IP"
+if [[ -n "$ALLOWED_IP" ]]; then
+  echo "ALLOWED_IP: $ALLOWED_IP"
+else
+  echo "ALLOWED_IP: пусто (ufw from не пишем, подписка без ACL)"
+fi
 if [[ "$ROLE" == "relay" ]]; then
   if [[ -n "${EU_SERVER_LINK:-}" ]]; then
     echo "EU_SERVER_LINK: задана"
@@ -31,6 +39,16 @@ if [[ "$ROLE" == "backbone" || "$ROLE" == "edge" ]]; then
 fi
 if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
   echo "CLIENT_MODE: $CLIENT_MODE"
+fi
+if [[ "$ROLE" == "relay" || "$ROLE" == "backbone" ]]; then
+  echo "EU_XHTTP_MODE: $EU_XHTTP_MODE"
+fi
+if [[ "$ROLE" == "relay" ]]; then
+  if [[ "$HELLO_FRAG" == "1" ]]; then
+    echo "HELLO_FRAG: tlshello ${HELLO_FRAG_LENGTH} / ${HELLO_FRAG_INTERVAL}ms"
+  else
+    echo "HELLO_FRAG: выключен"
+  fi
 fi
 echo ""
 
@@ -63,35 +81,29 @@ sudo mkdir -p "/var/www/html/${SUBS_PATH}"
 sudo cp "${SCRIPT_DIR}/index.html" "/var/www/html/index.html"
 sudo chown -R "${PROJECT_USER}:www-data" /var/www/html/
 
-if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
-  if ! command -v haproxy >/dev/null 2>&1; then
-    echo "Установка HAProxy"
-    wait_for_apt
-    sudo apt-get install -y haproxy
-  fi
-  sudo systemctl unmask haproxy
-  sudo systemctl enable haproxy
-  backup_if_exists "$HAPROXY_CFG" haproxy.cfg
-  install_haproxy_cert
-
-  if ! command -v docker >/dev/null 2>&1; then
-    echo "Установка Docker"
-    wait_for_apt
-    sudo apt-get install -y docker.io
-    wait_for_apt
-    sudo apt-get install -y docker-compose-v2 || sudo apt-get install -y docker-compose || true
-  fi
-  sudo systemctl enable --now docker
-  grant_project_user_admins
-  searxng_up
-  echo ""
-else
-  # ROLE=backbone: EU_SERVER_PORT — только Xray (fallbacks на nginx = подписка).
-  # Предыдущая роль edge/relay могла оставить HAProxy enabled — глушим всегда.
-  stop_haproxy_for_backbone
-  searxng_stop
+if ! command -v haproxy >/dev/null 2>&1; then
+  echo "Установка HAProxy"
+  wait_for_apt
+  sudo apt-get install -y haproxy
 fi
+sudo systemctl unmask haproxy
+sudo systemctl enable haproxy
+backup_if_exists "$HAPROXY_CFG" haproxy.cfg
+install_haproxy_cert
 
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Установка Docker"
+  wait_for_apt
+  sudo apt-get install -y docker.io
+  wait_for_apt
+  sudo apt-get install -y docker-compose-v2 || sudo apt-get install -y docker-compose || true
+fi
+sudo systemctl enable --now docker
+grant_project_user_admins
+searxng_up
+echo ""
+
+# Свой Xray из xray-core/xray-linux-* (hello_frag). Релизы XTLS не трогаем.
 install_xray
 echo ""
 
@@ -111,16 +123,14 @@ if [[ "$ROLE" == "relay" ]]; then
   resolve_relay_eu_uuid
   write_secrets
   echo "EU_UUID: $EU_UUID"
-  echo "EU outbound: ${EU_SERVER_DOMAIN}:${EU_SERVER_PORT} sni=${EU_SNI}"
+  echo "EU outbound: ${EU_SERVER_DOMAIN}:${EU_SERVER_PORT} sni=${EU_SNI} path=${EU_XHTTP_PATH} mode=${EU_XHTTP_MODE}"
 fi
 
 backup_if_exists "$XRAY_CONFIG" xray_config.json
 
 echo "Собираю конфиги"
 write_nginx_config
-if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
-  write_haproxy_config
-fi
+write_haproxy_config
 write_xray_config "$UUID" "${XHTTP_PATH:-}" "${EU_UUID:-}"
 
 echo "Тест Nginx"
@@ -130,24 +140,21 @@ sleep 1
 sudo systemctl status nginx --no-pager
 echo ""
 
-if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
-  echo "Тест HAProxy"
-  sudo haproxy -c -f "$HAPROXY_CFG"
-  sudo systemctl unmask haproxy
-  sudo systemctl enable haproxy
-  sudo systemctl restart haproxy
-  sleep 1
-  sudo systemctl status haproxy --no-pager
-  echo ""
-else
-  stop_haproxy_for_backbone
-fi
-
+# Xray раньше HAProxy: на старом backbone :EU_SERVER_PORT держал Xray (Vision).
 echo "systemctl enable --now / restart xray"
 sudo systemctl daemon-reload
 sudo systemctl enable xray
 restart_xray
 sudo systemctl status xray --no-pager
+echo ""
+
+echo "Тест HAProxy"
+sudo haproxy -c -f "$HAPROXY_CFG"
+sudo systemctl unmask haproxy
+sudo systemctl enable haproxy
+sudo systemctl restart haproxy
+sleep 1
+sudo systemctl status haproxy --no-pager
 echo ""
 assert_role_frontends
 echo ""
@@ -180,19 +187,21 @@ add_cron "59 23 * * * ${SCRIPT_DIR}/clear_xray_logs.sh" "clear_xray_logs.sh"
 current="$(sudo crontab -l 2>/dev/null || true)"
 current="$(printf '%s\n' "$current" \
   | grep -vF "change_uuid.sh" \
+  | grep -vF "change_uuid_and_path.sh" \
   | grep -vF "Ротация XTTP UUID для edge EU сервера" \
+  | grep -vF "Ротация UUID и XHTTP_PATH для edge EU сервера" \
   | grep -v '^$' || true)"
 if [[ "$ROLE" == "edge" ]]; then
   printf '%s\n' \
     "$current" \
-    "# Ротация XTTP UUID для edge EU сервера" \
-    "1 0 3,7,13,17,23,27 * * ${SCRIPT_DIR}/change_uuid.sh" \
+    "# Ротация UUID и XHTTP_PATH для edge EU сервера" \
+    "1 0 3,7,13,17,23,27 * * ${SCRIPT_DIR}/change_uuid_and_path.sh" \
     | grep -v '^$' | sudo crontab -
-  echo "Cron: change_uuid.sh (edge)"
-  echo "1 0 3,7,13,17,23,27 * * ${SCRIPT_DIR}/change_uuid.sh"
+  echo "Cron: change_uuid_and_path.sh (edge: UUID + XHTTP_PATH)"
+  echo "1 0 3,7,13,17,23,27 * * ${SCRIPT_DIR}/change_uuid_and_path.sh"
 else
   printf '%s\n' "$current" | grep -v '^$' | sudo crontab - || true
-  echo "Cron: change_uuid.sh снят (ROLE=${ROLE}, ротации UUID нет)"
+  echo "Cron: change_uuid_and_path.sh снят (ROLE=${ROLE}, ротации UUID/XHTTP_PATH нет)"
 fi
 
 echo "Файл подписки:"

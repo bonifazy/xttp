@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Общая библиотека xttp. Её source-ят main.sh, change_uuid.sh,
-# from_ru_relay_update_eu_uuid.sh, update_geodata.sh.
+# Общая библиотека xttp. Её source-ят main.sh, change_uuid_and_path.sh,
+# from_ru_relay_update_eu_uuid.sh, update_geodata.sh, tspu_watch.sh.
 # Проект всегда в /home/dim/xttp.
 
 SCRIPT_DIR="/home/dim/xttp"
@@ -33,8 +33,15 @@ PYTHON="${PYTHON:-python3}"
 # Порт магистрали: из .env, иначе 443.
 # С RU ALPN на :443 часто режут — для пары relay↔backbone ставят 8443.
 EU_SERVER_PORT="${EU_SERVER_PORT:-443}"
-EU_FLOW="xtls-rprx-vision"
+# Inbound XHTTP на всех ролях принимает любой режим клиента.
 XHTTP_MODE="auto"
+# Hop relay→backbone: packet-up (короткие POST). Не Vision: он только с TCP/stream-one.
+EU_XHTTP_MODE="${EU_XHTTP_MODE:-packet-up}"
+# telemt #844: на hop RU→EU режем только TLS ClientHello, не весь TCP.
+# 1 — включено (по умолчанию). 0 — обычный набор без fragment.
+HELLO_FRAG="${HELLO_FRAG:-1}"
+HELLO_FRAG_LENGTH="${HELLO_FRAG_LENGTH:-80-120}"
+HELLO_FRAG_INTERVAL="${HELLO_FRAG_INTERVAL:-8-20}"
 XRAY_XHTTP_LISTEN="127.0.0.1"
 XRAY_XHTTP_PORT=10085
 NGINX_FALLBACK="127.0.0.1:8081"
@@ -52,6 +59,7 @@ EU_SERVER_DOMAIN="${EU_SERVER_DOMAIN:-}"
 EU_SERVER_LINK="${EU_SERVER_LINK:-}"
 CLIENT_MODE="${CLIENT_MODE:-stream-up}"
 EU_SNI="${EU_SERVER_DOMAIN}"
+EU_XHTTP_PATH="${EU_XHTTP_PATH:-}"
 
 if [[ -f "$SECRETS_FILE" ]]; then
   # shellcheck source=/home/dim/xttp/.xttp_secrets
@@ -105,8 +113,8 @@ case "$ROLE" in
   *) _die "ROLE должен быть relay, edge или backbone. Сейчас: '${ROLE}'" ;;
 esac
 
-if [[ -z "$DOMAIN_NAME" || -z "$SUBS_PATH" || -z "$ALLOWED_IP" ]]; then
-  _die "В .env пусты DOMAIN_NAME, SUBS_PATH или ALLOWED_IP"
+if [[ -z "$DOMAIN_NAME" || -z "$SUBS_PATH" ]]; then
+  _die "В .env пусты DOMAIN_NAME или SUBS_PATH"
 fi
 
 if [[ "$ROLE" == "relay" && -z "$EU_SERVER_LINK" && -z "$EU_SERVER_DOMAIN" ]]; then
@@ -124,9 +132,23 @@ if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
   esac
 fi
 
-# Список IP из ALLOWED_IP. "*" — открыть всем.
+if [[ "$ROLE" == "relay" || "$ROLE" == "backbone" ]]; then
+  case "$EU_XHTTP_MODE" in
+    packet-up|stream-up|auto) ;;
+    *) _die "EU_XHTTP_MODE: packet-up, stream-up или auto. Сейчас: '${EU_XHTTP_MODE}'" ;;
+  esac
+fi
+
+if [[ "$ROLE" == "relay" ]]; then
+  case "$HELLO_FRAG" in
+    0|1) ;;
+    *) _die "HELLO_FRAG: 0 или 1. Сейчас: '${HELLO_FRAG}'" ;;
+  esac
+fi
+
+# Список IP из ALLOWED_IP. Пусто или "*" — без списка (ufw from не пишем).
 allowed_ips_list() {
-  if [[ "$ALLOWED_IP" == "*" ]]; then
+  if [[ -z "$ALLOWED_IP" || "$ALLOWED_IP" == "*" ]]; then
     return 0
   fi
   # shellcheck disable=SC2086
@@ -185,32 +207,30 @@ generate_uuid() {
   fi
 }
 
-# Пишет .xttp_secrets текущими UUID / XHTTP_PATH / EU_UUID.
+# Пишет .xttp_secrets текущими UUID / XHTTP_PATH / hop EU_*.
 # umask 077 + chmod 600 + dim:dim, даже если пишет root из cron.
 write_secrets() {
   umask 077
   {
     printf 'UUID=%s\n' "${UUID:-}"
-    if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
-      printf 'XHTTP_PATH=%s\n' "${XHTTP_PATH:-}"
-    fi
+    printf 'XHTTP_PATH=%s\n' "${XHTTP_PATH:-}"
     if [[ "$ROLE" == "relay" ]]; then
       printf 'EU_UUID=%s\n' "${EU_UUID:-}"
+      printf 'EU_XHTTP_PATH=%s\n' "${EU_XHTTP_PATH:-}"
+      printf 'EU_XHTTP_MODE=%s\n' "${EU_XHTTP_MODE:-packet-up}"
     fi
   } > "$SECRETS_FILE"
   chmod 600 "$SECRETS_FILE"
   chown_project_user "$SECRETS_FILE"
 }
 
-# Первый запуск: UUID и (для relay/edge) XHTTP_PATH. Повторный — только читает.
+# Первый запуск: UUID и XHTTP_PATH. Повторный — только читает.
 ensure_secrets() {
   if [[ ! -f "$SECRETS_FILE" ]]; then
     echo "Нет .xttp_secrets — генерирую UUID"
     UUID="$(generate_uuid)"
-    if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
-      XHTTP_PATH="/$(generate_uuid)"
-      echo "XHTTP_PATH сгенерирован"
-    fi
+    XHTTP_PATH="/$(generate_uuid)"
+    echo "XHTTP_PATH сгенерирован"
     write_secrets
     return 0
   fi
@@ -220,12 +240,10 @@ ensure_secrets() {
   if [[ -z "${UUID:-}" ]]; then
     _die "В .xttp_secrets нет UUID"
   fi
-  if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
-    if [[ -z "${XHTTP_PATH:-}" ]]; then
-      XHTTP_PATH="/$(generate_uuid)"
-      echo "В .xttp_secrets не было XHTTP_PATH — сгенерирован"
-      write_secrets
-    fi
+  if [[ -z "${XHTTP_PATH:-}" ]]; then
+    XHTTP_PATH="/$(generate_uuid)"
+    echo "В .xttp_secrets не было XHTTP_PATH — сгенерирован"
+    write_secrets
   fi
 }
 
@@ -243,27 +261,26 @@ https_url() {
 }
 
 # Собирает ссылку подписки. Хост — DOMAIN_NAME этого сервера.
-# relay/edge: vless+xhttp+tls. backbone: vless+tcp+tls+vision (для relay).
+# relay/edge: XHTTP + CLIENT_MODE (телефон). backbone: XHTTP + EU_XHTTP_MODE (hop relay).
 build_vless_link() {
   local uuid="${1:-$UUID}"
   if [[ -z "$uuid" ]]; then
     echo "build_vless_link: нет UUID" >&2
     return 1
   fi
-  if [[ "$ROLE" == "backbone" ]]; then
-    printf 'vless://%s@%s:%s?type=tcp&encryption=none&flow=%s&security=tls&sni=%s&fp=chrome&alpn=http%%2F1.1\n' \
-      "$uuid" "$DOMAIN_NAME" "$EU_SERVER_PORT" "$EU_FLOW" "$DOMAIN_NAME"
-    return 0
-  fi
   if [[ -z "${XHTTP_PATH:-}" ]]; then
     echo "build_vless_link: нет XHTTP_PATH" >&2
     return 1
   fi
   local client_port=443
-  if [[ "$ROLE" == "edge" ]]; then
+  local mode="$CLIENT_MODE"
+  if [[ "$ROLE" == "edge" || "$ROLE" == "backbone" ]]; then
     client_port="$EU_SERVER_PORT"
   fi
-  "$PYTHON" - "$uuid" "$DOMAIN_NAME" "$XHTTP_PATH" "$CLIENT_MODE" "$client_port" <<'PY'
+  if [[ "$ROLE" == "backbone" ]]; then
+    mode="${EU_XHTTP_MODE:-packet-up}"
+  fi
+  "$PYTHON" - "$uuid" "$DOMAIN_NAME" "$XHTTP_PATH" "$mode" "$client_port" <<'PY'
 import sys
 from urllib.parse import quote
 uuid, host, path, mode, port = sys.argv[1:]
@@ -288,7 +305,7 @@ parse_vless_uuid() {
   printf '%s\n' "$uuid"
 }
 
-# EU_SERVER_LINK → EU_UUID, EU_SERVER_DOMAIN, EU_SERVER_PORT, EU_SNI.
+# vless-ссылка backbone → EU_UUID, HOST, PORT, SNI, XHTTP path/mode.
 apply_eu_server_link() {
   local link parsed
   link="$(printf '%s' "${1:-${EU_SERVER_LINK:-}}" | tr -d '\r\n ')"
@@ -308,6 +325,10 @@ host = u.hostname or ""
 port = u.port
 qs = parse_qs(u.query, keep_blank_values=False)
 sni = unquote((qs.get("sni") or [host])[0] or "")
+typ = unquote((qs.get("type") or ["tcp"])[0] or "tcp")
+path = unquote((qs.get("path") or [""])[0] or "")
+mode = unquote((qs.get("mode") or [""])[0] or "")
+flow = unquote((qs.get("flow") or [""])[0] or "")
 if not uuid or not host:
     sys.stderr.write("EU_SERVER_LINK: нет UUID или хоста\n")
     sys.exit(1)
@@ -321,41 +342,61 @@ if not 1 <= int(port) <= 65535:
     sys.exit(1)
 if not sni:
     sni = host
+if typ != "xhttp" or flow:
+    sys.stderr.write(
+        "EU hop теперь VLESS+XHTTP, не tcp/Vision.\n"
+        "Поставьте в EU_SERVER_LINK ссылку с подписки backbone (type=xhttp&mode=packet-up).\n"
+    )
+    sys.exit(1)
+if not path:
+    sys.stderr.write("EU_SERVER_LINK: нет path для XHTTP\n")
+    sys.exit(1)
+if not path.startswith("/"):
+    path = "/" + path
+if not mode:
+    mode = "packet-up"
+if mode not in ("packet-up", "stream-up", "auto"):
+    sys.stderr.write(f"EU_SERVER_LINK: mode={mode} — нужен packet-up/stream-up/auto\n")
+    sys.exit(1)
 print(f"EU_UUID={uuid}")
 print(f"EU_SERVER_DOMAIN={host}")
 print(f"EU_SERVER_PORT={port}")
 print(f"EU_SNI={sni}")
+print(f"EU_XHTTP_PATH={path}")
+print(f"EU_XHTTP_MODE={mode}")
 PY
 )" || return 1
   eval "$parsed"
-  if [[ -z "${EU_UUID:-}" || -z "${EU_SERVER_DOMAIN:-}" ]]; then
+  if [[ -z "${EU_UUID:-}" || -z "${EU_SERVER_DOMAIN:-}" || -z "${EU_XHTTP_PATH:-}" ]]; then
     echo "EU_SERVER_LINK не разобралась" >&2
     return 1
   fi
 }
 
 # Для relay: постоянная EU_SERVER_LINK или GET подписки с backbone.
-# Ставит EU_UUID (и из ссылки — DOMAIN/PORT/SNI) в текущем shell, не в $().
+# Ставит hop-поля в текущем shell, не в $().
 resolve_relay_eu_uuid() {
+  local link
   if [[ -n "${EU_SERVER_LINK:-}" ]]; then
-    echo "EU_UUID из EU_SERVER_LINK, подписку backbone не запрашиваем"
+    echo "EU hop из EU_SERVER_LINK, подписку backbone не запрашиваем"
     apply_eu_server_link || return 1
     return 0
   fi
-  EU_UUID="$(fetch_eu_uuid)" || return 1
+  link="$(fetch_eu_link)" || return 1
+  apply_eu_server_link "$link" || return 1
 }
 
-# Качает подписку с backbone. Пишет UUID в stdout. При ошибке — подробности в stderr.
-fetch_eu_uuid() {
-  local url code tmp link uuid
+# Качает подписку с backbone. Пишет vless:// в stdout.
+fetch_eu_link() {
+  local url code tmp link
   url="$(https_url "$EU_SERVER_DOMAIN" "${SUBS_PATH}/update_subs_link")"
   tmp="$(mktemp)"
-  echo "Запрос EU_UUID: $url" >&2
+  echo "Запрос EU hop: $url" >&2
   code="$(curl -4sS --http1.1 -o "$tmp" -w '%{http_code}' --retry 3 --retry-delay 2 --max-time 20 "$url" || true)"
   link="$(tr -d '\r\n ' < "$tmp")"
   rm -f "$tmp"
   if [[ "$code" != "200" ]] || [[ "$link" != vless://* ]]; then
-    echo "Не удалось получить EU_UUID с ${url}" >&2
+    echo "Не удалось получить ссылку backbone с ${url}" >&2
     echo "curl: HTTP ${code:-error}" >&2
     if [[ -n "$link" ]]; then
       echo "ответ: ${link:0:200}" >&2
@@ -364,8 +405,7 @@ fetch_eu_uuid() {
     echo "IP этого relay есть в ALLOWED_IP на backbone." >&2
     return 1
   fi
-  uuid="$(parse_vless_uuid "$link")" || return 1
-  printf '%s\n' "$uuid"
+  printf '%s\n' "$link"
 }
 
 apply_ufw() {
@@ -377,9 +417,10 @@ apply_ufw() {
     sudo ufw allow 80/tcp comment "HTTP redirect"
     sudo ufw allow "${EU_SERVER_PORT}/tcp" comment "HTTPS"
   elif [[ "$ROLE" == "backbone" ]]; then
+    sudo ufw allow 80/tcp comment "HTTP redirect"
     sudo ufw allow "${EU_SERVER_PORT}/tcp" comment "HTTPS backbone"
   fi
-  if [[ "$ALLOWED_IP" != "*" ]]; then
+  if [[ -n "$ALLOWED_IP" && "$ALLOWED_IP" != "*" ]]; then
     while read -r ip; do
       [[ -z "$ip" ]] && continue
       sudo ufw allow from "$ip" comment "All from allowed_ip"
@@ -470,6 +511,10 @@ publish_link() {
 }
 
 # Собирает /usr/local/etc/xray/config.json. В xhttpSettings только path и mode.
+# XHTTP-паддинг ядро ставит само (xPaddingBytes 100-1000, Referer x_padding / X-Padding).
+# Все роли: VLESS+XHTTP на 127.0.0.1 (TLS снимает HAProxy).
+# relay outbound: XHTTP packet-up + TLS на backbone.
+# ClientHello-only fragment — патч xray-core (XRAY_HELLO_FRAG в unit), не JSON.
 write_xray_config() {
   local uuid="${1:-$UUID}"
   local xhttp_path="${2:-${XHTTP_PATH:-}}"
@@ -478,26 +523,40 @@ write_xray_config() {
     echo "write_xray_config: нет UUID" >&2
     return 1
   fi
-  if [[ "$ROLE" == "relay" && -z "$eu_uuid" ]]; then
-    echo "write_xray_config: нет EU_UUID" >&2
-    return 1
-  fi
-  if [[ "$ROLE" != "backbone" && -z "$xhttp_path" ]]; then
+  if [[ -z "$xhttp_path" ]]; then
     echo "write_xray_config: нет XHTTP_PATH" >&2
     return 1
   fi
+  if [[ "$ROLE" == "relay" ]]; then
+    if [[ -z "$eu_uuid" ]]; then
+      echo "write_xray_config: нет EU_UUID" >&2
+      return 1
+    fi
+    if [[ -z "${EU_XHTTP_PATH:-}" ]]; then
+      echo "write_xray_config: нет EU_XHTTP_PATH (ссылка backbone без type=xhttp&path=)" >&2
+      return 1
+    fi
+  fi
   "$PYTHON" - "/tmp/xray-config.json" "$ROLE" "$uuid" "$xhttp_path" "$eu_uuid" \
-    "$DOMAIN_NAME" "${EU_SERVER_DOMAIN:-}" "$EU_FLOW" "$EU_SERVER_PORT" "${EU_SNI:-}" \
-    "$XHTTP_MODE" "$XRAY_XHTTP_LISTEN" "$XRAY_XHTTP_PORT" "$SSL_DIR" "$NGINX_FALLBACK" <<'PY'
+    "$DOMAIN_NAME" "${EU_SERVER_DOMAIN:-}" "$EU_SERVER_PORT" "${EU_SNI:-}" \
+    "$XHTTP_MODE" "$XRAY_XHTTP_LISTEN" "$XRAY_XHTTP_PORT" \
+    "${EU_XHTTP_PATH:-}" "${EU_XHTTP_MODE:-packet-up}" <<'PY'
 import json, sys
 
 (
-    dst, role, uuid, xhttp_path, eu_uuid, domain, eu_host, eu_flow,
-    eu_port, eu_sni, xhttp_mode, xlisten, xport, ssl_dir, fallback,
+    dst, role, uuid, xhttp_path, eu_uuid, domain, eu_host,
+    eu_port, eu_sni, xhttp_mode, xlisten, xport,
+    eu_xhttp_path, eu_xhttp_mode,
 ) = sys.argv[1:]
 xport = int(xport)
-eu_port = int(eu_port)
-fb_host, fb_port = fallback.rsplit(":", 1)
+eu_port = int(eu_port) if eu_port else 443
+
+
+def xhttp_settings(path, mode):
+    if path and not path.startswith("/"):
+        path = "/" + path
+    return {"path": path, "mode": mode}
+
 
 log = {"loglevel": "warning", "access": "none"}
 
@@ -510,30 +569,85 @@ sniff = {
 direct = {"protocol": "freedom", "tag": "direct"}
 block = {"protocol": "blackhole", "tag": "block"}
 
-if role == "backbone":
-    inbound = {
-        "tag": "vless-in",
-        "listen": "0.0.0.0",
-        "port": eu_port,
+inbound = {
+    "tag": "xhttp-in",
+    "listen": xlisten,
+    "port": xport,
+    "protocol": "vless",
+    "settings": {
+        "clients": [{"id": uuid, "email": "dim"}],
+        "decryption": "none",
+    },
+    "streamSettings": {
+        "network": "xhttp",
+        "security": "none",
+        "xhttpSettings": xhttp_settings(xhttp_path, xhttp_mode),
+    },
+    "sniffing": sniff,
+}
+
+if role == "relay":
+    eu = {
+        "tag": "eu",
         "protocol": "vless",
         "settings": {
-            "clients": [{"id": uuid, "flow": eu_flow, "email": "dim"}],
-            "decryption": "none",
-            "fallbacks": [{"dest": fallback, "xver": 1}],
+            "vnext": [{
+                "address": eu_host,
+                "port": eu_port,
+                "users": [{
+                    "id": eu_uuid,
+                    "encryption": "none",
+                }],
+            }]
         },
         "streamSettings": {
-            "network": "tcp",
+            "network": "xhttp",
             "security": "tls",
             "tlsSettings": {
-                "alpn": ["http/1.1"],
-                "certificates": [{
-                    "certificateFile": f"{ssl_dir}/fullchain.crt",
-                    "keyFile": f"{ssl_dir}/cert.key",
-                }],
+                "serverName": eu_sni or eu_host,
+                "alpn": ["h2"],
+                "fingerprint": "chrome",
             },
+            "xhttpSettings": xhttp_settings(eu_xhttp_path, eu_xhttp_mode),
+            "sockopt": {"domainStrategy": "UseIPv4"},
         },
-        "sniffing": sniff,
     }
+    outbounds = [eu, direct, block]
+    dns = {
+        "servers": [
+            {
+                "address": "8.8.8.8",
+                "domains": [f"full:{domain}", f"full:{eu_host}"],
+                "skipFallback": True,
+                "tag": "dns-direct",
+            },
+            {
+                "address": "77.88.8.8",
+                "domains": [
+                    "geosite:category-ru",
+                    "regexp:.*\\.ru$",
+                    "regexp:.*\\.su$",
+                    "domain:xn--p1ai",
+                ],
+                "skipFallback": True,
+                "tag": "dns-ru",
+            },
+            {"address": "1.1.1.1", "tag": "dns-eu"},
+        ],
+        "queryStrategy": "UseIPv4",
+        "disableFallbackIfMatch": True,
+        "tag": "dns-in",
+    }
+    rules = [
+        {"type": "field", "inboundTag": ["dns-direct", "dns-ru"], "outboundTag": "direct"},
+        {"type": "field", "inboundTag": ["dns-eu"], "outboundTag": "eu"},
+        {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"},
+        {"type": "field", "domain": ["geosite:category-ads-all", "geosite:category-public-tracker"], "outboundTag": "block"},
+        {"type": "field", "domain": [f"full:{domain}", f"full:{eu_host}", "domain:nerabotaet.com"], "outboundTag": "direct"},
+        {"type": "field", "domain": ["geosite:category-ru", "regexp:.*\\.ru$", "regexp:.*\\.su$", "domain:xn--p1ai"], "outboundTag": "direct"},
+        {"type": "field", "ip": ["geoip:ru", "geoip:private"], "outboundTag": "direct"},
+    ]
+else:
     outbounds = [direct, block]
     dns = {
         "servers": ["1.1.1.1", "8.8.8.8"],
@@ -545,96 +659,6 @@ if role == "backbone":
         {"type": "field", "domain": ["geosite:category-ads-all", "geosite:category-public-tracker"], "outboundTag": "block"},
         {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"},
     ]
-else:
-    inbound = {
-        "tag": "xhttp-in",
-        "listen": xlisten,
-        "port": xport,
-        "protocol": "vless",
-        "settings": {
-            "clients": [{"id": uuid, "email": "dim"}],
-            "decryption": "none",
-        },
-        "streamSettings": {
-            "network": "xhttp",
-            "security": "none",
-            "xhttpSettings": {"path": xhttp_path, "mode": xhttp_mode},
-        },
-        "sniffing": sniff,
-    }
-    if role == "relay":
-        eu = {
-            "tag": "eu",
-            "protocol": "vless",
-            "settings": {
-                "vnext": [{
-                    "address": eu_host,
-                    "port": eu_port,
-                    "users": [{
-                        "id": eu_uuid,
-                        "encryption": "none",
-                        "flow": eu_flow,
-                    }],
-                }]
-            },
-            "streamSettings": {
-                "network": "tcp",
-                "security": "tls",
-                "tlsSettings": {
-                    "serverName": eu_sni or eu_host,
-                    "alpn": ["http/1.1"],
-                    "fingerprint": "chrome",
-                },
-                "sockopt": {"domainStrategy": "UseIPv4"},
-            },
-        }
-        outbounds = [eu, direct, block]
-        dns = {
-            "servers": [
-                {
-                    "address": "8.8.8.8",
-                    "domains": [f"full:{domain}", f"full:{eu_host}"],
-                    "skipFallback": True,
-                    "tag": "dns-direct",
-                },
-                {
-                    "address": "77.88.8.8",
-                    "domains": [
-                        "geosite:category-ru",
-                        "regexp:.*\\.ru$",
-                        "regexp:.*\\.su$",
-                        "domain:xn--p1ai",
-                    ],
-                    "skipFallback": True,
-                    "tag": "dns-ru",
-                },
-                {"address": "1.1.1.1", "tag": "dns-eu"},
-            ],
-            "queryStrategy": "UseIPv4",
-            "disableFallbackIfMatch": True,
-            "tag": "dns-in",
-        }
-        rules = [
-            {"type": "field", "inboundTag": ["dns-direct", "dns-ru"], "outboundTag": "direct"},
-            {"type": "field", "inboundTag": ["dns-eu"], "outboundTag": "eu"},
-            {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"},
-            {"type": "field", "domain": ["geosite:category-ads-all", "geosite:category-public-tracker"], "outboundTag": "block"},
-            {"type": "field", "domain": [f"full:{domain}", f"full:{eu_host}", "domain:nerabotaet.com"], "outboundTag": "direct"},
-            {"type": "field", "domain": ["geosite:category-ru", "regexp:.*\\.ru$", "regexp:.*\\.su$", "domain:xn--p1ai"], "outboundTag": "direct"},
-            {"type": "field", "ip": ["geoip:ru", "geoip:private"], "outboundTag": "direct"},
-        ]
-    else:
-        outbounds = [direct, block]
-        dns = {
-            "servers": ["1.1.1.1", "8.8.8.8"],
-            "queryStrategy": "UseIPv4",
-            "disableFallbackIfMatch": True,
-        }
-        rules = [
-            {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"},
-            {"type": "field", "domain": ["geosite:category-ads-all", "geosite:category-public-tracker"], "outboundTag": "block"},
-            {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"},
-        ]
 
 cfg = {
     "log": log,
@@ -655,15 +679,12 @@ PY
 }
 
 write_haproxy_config() {
-  if [[ "$ROLE" == "backbone" ]]; then
-    return 0
-  fi
   if [[ -z "${XHTTP_PATH:-}" ]]; then
     echo "write_haproxy_config: нет XHTTP_PATH" >&2
     return 1
   fi
   local tls_port=443
-  if [[ "$ROLE" == "edge" ]]; then
+  if [[ "$ROLE" == "edge" || "$ROLE" == "backbone" ]]; then
     tls_port="$EU_SERVER_PORT"
   fi
   "$PYTHON" - "/tmp/haproxy.cfg" "$DOMAIN_NAME" "$SUBS_PATH" "$XHTTP_PATH" \
@@ -675,11 +696,11 @@ tls_port = int(tls_port)
 subs_path = f"/{subs.strip('/')}/update_subs_link"
 if not xhttp.startswith("/"):
     xhttp = "/" + xhttp
-ips = [] if allowed == "*" else allowed.split()
+ips = [] if allowed in ("", "*") else allowed.split()
 acl_ok = ""
 use_subs = "use_backend be_subs if is_subs"
 if ips:
-    acl_ok = "    acl subs_ok src " + " ".join(ips) + "\n"
+    acl_ok = "    acl subs_ok src 127.0.0.1 " + " ".join(ips) + "\n"
     use_subs = "use_backend be_subs if is_subs subs_ok"
 bind_ssl = f"    bind :{tls_port} ssl crt {cert} alpn h2,http/1.1"
 if tls_port == 443:
@@ -702,6 +723,8 @@ cfg = f"""global
     ssl-default-bind-options ssl-min-ver TLSv1.2 prefer-client-ciphers no-tls-tickets
     tune.h2.fe.initial-window-size 1048576
     tune.h2.be.initial-window-size 1048576
+    # telemt #844: большие TLS-записи на потоке; мелкий maxrecord = MSS на всю сессию.
+    tune.ssl.maxrecord 16384
 
 defaults
     mode http
@@ -710,6 +733,9 @@ defaults
     option dontlognull
     option dontlog-normal
     option http-keep-alive
+    # cork первого ответа: ServerHello+сертификат в одном TCP, не ~200 байт SH.
+    option tcp-smart-accept
+    option tcp-smart-connect
     timeout connect 5s
     timeout client  1h
     timeout server  1h
@@ -763,7 +789,7 @@ write_nginx_config() {
 import sys
 dst, subs, allowed = sys.argv[1:]
 subs = subs.strip("/")
-if allowed == "*":
+if allowed in ("", "*"):
     geo_body = "    default 1;\n"
 else:
     lines = ["    default 0;", "    127.0.0.1 1;", "    ::1 1;"]
@@ -874,7 +900,7 @@ searxng_up() {
   searxng_compose up -d --force-recreate --remove-orphans
 }
 
-# Останавливает контейнеры при ROLE=backbone. volumes и searxng/.env не трогает.
+# Останавливает контейнеры SearXNG. volumes и searxng/.env не трогает.
 searxng_stop() {
   if [[ ! -f "${SEARXNG_DIR}/docker-compose.yml" ]]; then
     return 0
@@ -903,6 +929,9 @@ CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 ExecStart=/usr/local/bin/xray run -config ${XRAY_CONFIG}
+Environment=XRAY_HELLO_FRAG=${HELLO_FRAG}
+Environment=XRAY_HELLO_FRAG_LENGTH=${HELLO_FRAG_LENGTH}
+Environment=XRAY_HELLO_FRAG_INTERVAL=${HELLO_FRAG_INTERVAL}
 Restart=on-failure
 RestartPreventExitStatus=23
 LimitNPROC=10000
@@ -920,6 +949,9 @@ User=${unit_user}
 Group=${unit_group}
 ExecStart=
 ExecStart=/usr/local/bin/xray run -config ${XRAY_CONFIG}
+Environment=XRAY_HELLO_FRAG=${HELLO_FRAG}
+Environment=XRAY_HELLO_FRAG_LENGTH=${HELLO_FRAG_LENGTH}
+Environment=XRAY_HELLO_FRAG_INTERVAL=${HELLO_FRAG_INTERVAL}
 EOF
   sudo systemctl daemon-reload
 }
@@ -941,29 +973,60 @@ adopt_xray_runtime_user() {
   fi
 }
 
-# Официальный Xray-install: бинарник. Unit xray.service дописываем сами, если его нет.
+# Xray на VPS: готовый ELF из xray-core/xray-linux-* (сборка на Mac: ./build_xray_release.sh).
+# Патч hello_frag уже внутри бинарника. Go/swap на VPS не нужны. GitHub не качаем.
+linux_xray_arch() {
+  local debarch
+  debarch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+  case "$debarch" in
+    amd64|x86_64) echo amd64 ;;
+    arm64|aarch64) echo arm64 ;;
+    *) return 1 ;;
+  esac
+}
+
 install_xray() {
-  local need=0
-  if [[ ! -x /usr/local/bin/xray ]]; then
-    need=1
-    echo "Xray не установлен. Начинаю установку..."
-  else
-    echo "пакет xray уже установлен"
+  local src="${SCRIPT_DIR}/xray-core"
+  local arch tag stamp bin
+  if [[ "$(uname -s)" != "Linux" ]]; then
+    _die "Xray ставится только на Ubuntu VPS. Сейчас: $(uname -s). Сборка релиза: ./build_xray_release.sh"
   fi
-  if [[ "$need" -eq 1 ]]; then
-    echo ""
-    curl -fsSL --retry 3 -o /tmp/xray-install.sh \
-      https://github.com/XTLS/Xray-install/raw/main/install-release.sh
-    if [[ -n "${XRAY_VER:-}" ]]; then
-      sudo bash /tmp/xray-install.sh install --version "$XRAY_VER"
-    else
-      sudo bash /tmp/xray-install.sh install
-    fi
-    rm -f /tmp/xray-install.sh
+  if [[ ! -f /etc/os-release ]]; then
+    _die "нет /etc/os-release — нужен Ubuntu 24.04 или 26.04"
+  fi
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  if [[ "${ID:-}" != "ubuntu" ]]; then
+    _die "xttp/Xray только Ubuntu. Сейчас: ${ID:-?} ${VERSION_ID:-?}"
+  fi
+  case "${VERSION_ID:-}" in
+    24.04|26.04) ;;
+    *) _die "xttp/Xray: Ubuntu 24.04 или 26.04. Сейчас: ${VERSION_ID:-?}" ;;
+  esac
+  arch="$(linux_xray_arch)" || _die "архитектура $(uname -m): нужен amd64 или arm64"
+  tag="$(head -n 1 "${src}/XTLS_TAG" 2>/dev/null | tr -d '[:space:]')"
+  tag="${tag:-v26.10.17}"
+  stamp="/usr/local/share/xray/.xttp_build"
+  bin="${src}/xray-linux-${arch}"
+  if [[ ! -f "$bin" ]]; then
+    _die "нет ${bin}. На Mac: ./build_xray_release.sh и скопируйте xray-core/xray-linux-* на VPS."
+  fi
+  if [[ -x /usr/local/bin/xray ]] && [[ -f "$stamp" ]] \
+    && [[ "$(cat "$stamp")" == "${tag} hello-frag ${arch}" ]] \
+    && /usr/local/bin/xray version 2>/dev/null | grep -q "xttp-hello-frag"; then
+    echo "Xray ${tag} linux/${arch} уже стоит (xttp-hello-frag)"
+  else
+    echo "Ставлю Xray ${tag} linux/${arch} из ${bin} (не GitHub, не go build)"
+    sudo install -o root -g root -m 755 "$bin" /usr/local/bin/xray
+    sudo mkdir -p /usr/local/share/xray
+    echo "${tag} hello-frag ${arch}" | sudo tee "$stamp" >/dev/null
   fi
   sudo xray version || sudo xray -version
   if [[ ! -x /usr/local/bin/xray ]]; then
     _die "после установки нет /usr/local/bin/xray"
+  fi
+  if ! /usr/local/bin/xray version 2>/dev/null | grep -q "xttp-hello-frag"; then
+    _die "/usr/local/bin/xray без xttp-hello-frag — это не наш релиз"
   fi
   adopt_xray_runtime_user
   echo "xray.service -> ${XRAY_CONFIG} (User=${XRAY_USER})"
@@ -1029,29 +1092,7 @@ restart_xray() {
   fi
 }
 
-# ROLE=backbone: HAProxy не должен держать TLS-порт — иначе Xray не стартует
-# и подписка через fallbacks молчит.
-stop_haproxy_for_backbone() {
-  echo "ROLE=backbone: останавливаю HAProxy, :${EU_SERVER_PORT} отдаём Xray"
-  sudo systemctl stop haproxy 2>/dev/null || true
-  sudo systemctl disable haproxy 2>/dev/null || true
-  sudo systemctl reset-failed haproxy 2>/dev/null || true
-  local n
-  for n in 1 2 3 4 5 6 7 8; do
-    if sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q haproxy; then
-      echo "ждём, пока HAProxy отпустит :${EU_SERVER_PORT} (${n}/8)..."
-      sudo systemctl stop haproxy 2>/dev/null || true
-      sleep 1
-    else
-      break
-    fi
-  done
-  if sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q haproxy; then
-    _die "ROLE=backbone: :${EU_SERVER_PORT} всё ещё у HAProxy. Подписка через Xray fallbacks не поднимется."
-  fi
-}
-
-# После старта: на backbone EU_SERVER_PORT = xray, GET подписки возвращает vless://
+# После старта backbone: HAProxy на EU_SERVER_PORT, Xray на localhost, подписка = xhttp.
 assert_role_frontends() {
   if [[ "$ROLE" != "backbone" ]]; then
     return 0
@@ -1062,30 +1103,45 @@ assert_role_frontends() {
     sudo journalctl -u xray -n 40 --no-pager >&2 || true
     _die "xray не active — ${url} не работает"
   fi
-  if sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q haproxy; then
-    _die "после старта :${EU_SERVER_PORT} снова у HAProxy"
+  if ! systemctl is-active --quiet haproxy; then
+    sudo journalctl -u haproxy -n 40 --no-pager >&2 || true
+    _die "haproxy не active — :${EU_SERVER_PORT} должен держать HAProxy, не Xray"
   fi
   local n
   for n in 1 2 3 4 5 6 7 8 9 10; do
-    if sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q xray; then
+    if sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q haproxy; then
       break
     fi
-    echo "ждём, пока xray откроет :${EU_SERVER_PORT} (${n}/10)..."
+    echo "ждём, пока HAProxy откроет :${EU_SERVER_PORT} (${n}/10)..."
     sleep 1
   done
-  if ! sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q xray; then
+  if ! sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q haproxy; then
+    sudo journalctl -u haproxy -n 40 --no-pager >&2 || true
+    _die "HAProxy не слушает :${EU_SERVER_PORT}"
+  fi
+  if sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q xray; then
+    _die "xray всё ещё на :${EU_SERVER_PORT} — старый Vision-inbound. Перезапустите ./main.sh"
+  fi
+  for n in 1 2 3 4 5 6 7 8 9 10; do
+    if sudo ss -lntp 2>/dev/null | grep -E ":${XRAY_XHTTP_PORT}\\b" | grep -q xray; then
+      break
+    fi
+    echo "ждём, пока xray откроет ${XRAY_XHTTP_LISTEN}:${XRAY_XHTTP_PORT} (${n}/10)..."
+    sleep 1
+  done
+  if ! sudo ss -lntp 2>/dev/null | grep -E ":${XRAY_XHTTP_PORT}\\b" | grep -q xray; then
     sudo journalctl -u xray -n 40 --no-pager >&2 || true
-    _die "xray не слушает :${EU_SERVER_PORT}"
+    _die "xray не слушает ${XRAY_XHTTP_LISTEN}:${XRAY_XHTTP_PORT}"
   fi
   local code tmp
   tmp="$(mktemp)"
   code="$(curl -4sk --http1.1 --resolve "${DOMAIN_NAME}:${EU_SERVER_PORT}:127.0.0.1" -o "$tmp" -w '%{http_code}' --max-time 10 "$url" || true)"
-  if [[ "$code" != "200" ]] || ! grep -q '^vless://' "$tmp"; then
+  if [[ "$code" != "200" ]] || ! grep -q '^vless://' "$tmp" || ! grep -q 'type=xhttp' "$tmp"; then
     echo "HTTP ${code} с ${url} (через 127.0.0.1)" >&2
     head -c 400 "$tmp" >&2 || true
     echo >&2
     rm -f "$tmp"
-    _die "подписка не отдаётся. На backbone GET /$SUBS_PATH/update_subs_link идёт в Xray fallbacks → nginx."
+    _die "подписка не отдаёт XHTTP-ссылку. GET /$SUBS_PATH/update_subs_link идёт в HAProxy → nginx."
   fi
   echo "подписка отвечает: $url"
   rm -f "$tmp"
