@@ -1013,7 +1013,7 @@ install_xray() {
   fi
   if [[ -x /usr/local/bin/xray ]] && [[ -f "$stamp" ]] \
     && [[ "$(cat "$stamp")" == "${tag} hello-frag ${arch}" ]] \
-    && /usr/local/bin/xray version 2>/dev/null | grep -q "xttp-hello-frag"; then
+    && /usr/local/bin/xray version 2>&1 | grep -q "xttp-hello-frag"; then
     echo "Xray ${tag} linux/${arch} уже стоит (xttp-hello-frag)"
   else
     echo "Ставлю Xray ${tag} linux/${arch} из ${bin} (не GitHub, не go build)"
@@ -1025,7 +1025,7 @@ install_xray() {
   if [[ ! -x /usr/local/bin/xray ]]; then
     _die "после установки нет /usr/local/bin/xray"
   fi
-  if ! /usr/local/bin/xray version 2>/dev/null | grep -q "xttp-hello-frag"; then
+  if ! /usr/local/bin/xray version 2>&1 | grep -q "xttp-hello-frag"; then
     _die "/usr/local/bin/xray без xttp-hello-frag — это не наш релиз"
   fi
   adopt_xray_runtime_user
