@@ -690,7 +690,17 @@ write_haproxy_config() {
     tls_port="$EU_SERVER_PORT"
   fi
   # 2.4 (Ubuntu 22.04): tune.h2.initial-window-size. 2.6+: fe/be.
-  hap_ver="$(haproxy -v 2>/dev/null | awk 'NR==1 { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+/) { print $i; exit } }')"
+  # haproxy обычно в /usr/sbin — его нет в PATH у dim; с set -e это роняло main.sh.
+  local hap_bin=""
+  if command -v haproxy >/dev/null 2>&1; then
+    hap_bin="$(command -v haproxy)"
+  elif [[ -x /usr/sbin/haproxy ]]; then
+    hap_bin=/usr/sbin/haproxy
+  fi
+  hap_ver=""
+  if [[ -n "$hap_bin" ]]; then
+    hap_ver="$("$hap_bin" -v 2>/dev/null | awk 'NR==1 { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+/) { print $i; exit } }' || true)"
+  fi
   hap_ver="${hap_ver%%-*}"
   hap_maj="${hap_ver%%.*}"
   hap_min="${hap_ver#*.}"; hap_min="${hap_min%%.*}"

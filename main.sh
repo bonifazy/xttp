@@ -130,7 +130,9 @@ backup_if_exists "$XRAY_CONFIG" xray_config.json
 
 echo "Собираю конфиги"
 write_nginx_config
+echo "Пишу HAProxy"
 write_haproxy_config
+echo "Пишу Xray config"
 write_xray_config "$UUID" "${XHTTP_PATH:-}" "${EU_UUID:-}"
 
 echo "Тест Nginx"
