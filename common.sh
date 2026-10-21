@@ -999,7 +999,7 @@ install_xray() {
     _die "Xray ставится только на Ubuntu VPS. Сейчас: $(uname -s). Сборка релиза: ./build_xray_release.sh"
   fi
   if [[ ! -f /etc/os-release ]]; then
-    _die "нет /etc/os-release — нужен Ubuntu 24.04 или 26.04"
+    _die "нет /etc/os-release — нужен Ubuntu 22.04, 24.04 или 26.04"
   fi
   # shellcheck disable=SC1091
   . /etc/os-release
@@ -1007,8 +1007,8 @@ install_xray() {
     _die "xttp/Xray только Ubuntu. Сейчас: ${ID:-?} ${VERSION_ID:-?}"
   fi
   case "${VERSION_ID:-}" in
-    24.04|26.04) ;;
-    *) _die "xttp/Xray: Ubuntu 24.04 или 26.04. Сейчас: ${VERSION_ID:-?}" ;;
+    22.04|24.04|26.04) ;;
+    *) _die "xttp/Xray: Ubuntu 22.04, 24.04 или 26.04. Сейчас: ${VERSION_ID:-?}" ;;
   esac
   arch="$(linux_xray_arch)" || _die "архитектура $(uname -m): нужен amd64 или arm64"
   tag="$(head -n 1 "${src}/XTLS_TAG" 2>/dev/null | tr -d '[:space:]')"

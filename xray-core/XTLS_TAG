@@ -1,3 +1,3 @@
 v26.10.17
-# xttp: linux amd64/arm64, сборка на Mac (./build_xray_release.sh). Ubuntu 24.04/26.04.
+# xttp: linux amd64/arm64, сборка на Mac (./build_xray_release.sh). Ubuntu 22.04/24.04/26.04.
 # ClientHello-only fragment (telemt #844).

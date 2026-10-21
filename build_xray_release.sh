@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Сборка linux-бинарника Xray на Mac (патч hello_frag / telemt #844).
-# CGO=0: один ELF для Ubuntu 24.04 и 26.04. На VPS go build не нужен.
+# CGO=0: один ELF для Ubuntu 22.04/24.04/26.04. На VPS go build не нужен.
 # Запуск: ./build_xray_release.sh
 set -euo pipefail
 
@@ -120,4 +120,4 @@ build_one arm64
   echo "built_host=${goos}/${goarch}"
   echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } > "${DIST}/xray-linux.BUILD"
-echo "Готово: ${DIST}/xray-linux-amd64 и xray-linux-arm64 (Ubuntu 24.04/26.04)"
+echo "Готово: ${DIST}/xray-linux-amd64 и xray-linux-arm64 (Ubuntu 22.04/24.04/26.04)"
