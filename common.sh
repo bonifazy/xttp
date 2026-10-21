@@ -674,6 +674,7 @@ with open(dst, "w", encoding="utf-8") as f:
     json.dump(cfg, f, indent=2)
     f.write("\n")
 PY
+  sudo mkdir -p "$(dirname "$XRAY_CONFIG")"
   sudo install -o root -g "$XRAY_GROUP" -m 640 /tmp/xray-config.json "$XRAY_CONFIG"
   rm -f /tmp/xray-config.json
 }
