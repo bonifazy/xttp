@@ -673,8 +673,18 @@ with open(dst, "w", encoding="utf-8") as f:
     json.dump(cfg, f, indent=2)
     f.write("\n")
 PY
-  sudo mkdir -p "$(dirname "$XRAY_CONFIG")"
-  sudo install -o root -g "$XRAY_GROUP" -m 640 /tmp/xray-config.json "$XRAY_CONFIG"
+  # sudo mkdir -p с umask 077 даёт 700 root:root — User=xray не открывает config.json
+  # (Helsinki: permission denied, exit 23). Каталог 750 root:xray, файл 640.
+  local cfg_dir cfg_grp
+  cfg_dir="$(dirname "$XRAY_CONFIG")"
+  cfg_grp="${XRAY_GROUP}"
+  if [[ -z "$cfg_grp" || "$cfg_grp" == "nogroup" ]]; then
+    cfg_grp=xray
+  fi
+  sudo mkdir -p "$cfg_dir"
+  sudo chown "root:${cfg_grp}" "$cfg_dir"
+  sudo chmod 750 "$cfg_dir"
+  sudo install -o root -g "$cfg_grp" -m 640 /tmp/xray-config.json "$XRAY_CONFIG"
   rm -f /tmp/xray-config.json
 }
 
@@ -1125,17 +1135,18 @@ restart_xray() {
   fi
 }
 
-# После старта backbone: HAProxy на EU_SERVER_PORT, Xray на localhost, подписка = xhttp.
+# Xray должен быть active на любой роли. Иначе HAProxy отдаёт 502 на XHTTP path
+# (подписка при этом 200 — как на Helsinki). Backbone: ещё HAProxy на :EU_SERVER_PORT.
 assert_role_frontends() {
+  if ! systemctl is-active --quiet xray; then
+    sudo journalctl -u xray -n 40 --no-pager >&2 || true
+    _die "xray не active — HAProxy :443 жив, прокси нет"
+  fi
   if [[ "$ROLE" != "backbone" ]]; then
     return 0
   fi
   local url
   url="$(https_url "$DOMAIN_NAME" "${SUBS_PATH}/update_subs_link")"
-  if ! systemctl is-active --quiet xray; then
-    sudo journalctl -u xray -n 40 --no-pager >&2 || true
-    _die "xray не active — ${url} не работает"
-  fi
   if ! systemctl is-active --quiet haproxy; then
     sudo journalctl -u haproxy -n 40 --no-pager >&2 || true
     _die "haproxy не active — :${EU_SERVER_PORT} должен держать HAProxy, не Xray"
