@@ -2,7 +2,8 @@
 #
 # Перед ./main.sh:
 #   1. .env из env_markup — ROLE и переменные для этой роли
-#   2. Сертификаты в /tmp/fullchain.crt и /tmp/cert.key (или уже в SSL_DIR)
+#   2. Wildcard-пара в ~/CERT_DOMAIN/{fullchain.crt,cert.key} или /tmp
+#      (апекс из DOMAIN_NAME: duba1e.newip.dev → ~/newip.dev)
 #   3. DNS DOMAIN_NAME смотрит на этот VPS
 #   4. ROLE=relay: в .env EU_SERVER_LINK = постоянная vless-ссылка backbone
 #      (XHTTP packet-up). Если пусто — качаем /$SUBS_PATH/update_subs_link
@@ -21,6 +22,9 @@ source /home/dim/xttp/common.sh
 echo ""
 echo "ROLE: $ROLE"
 echo "DOMAIN_NAME: $DOMAIN_NAME"
+echo "CERT_DOMAIN: $CERT_DOMAIN"
+echo "HOME_SSL_DIR: $HOME_SSL_DIR"
+echo "SSL_DIR: $SSL_DIR"
 echo "SUBS_PATH: $SUBS_PATH"
 if [[ -n "$ALLOWED_IP" ]]; then
   echo "ALLOWED_IP: $ALLOWED_IP"

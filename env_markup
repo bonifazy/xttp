@@ -9,6 +9,8 @@
 ROLE="edge"
 
 # Имя этого сервера (SNI, хост в ссылке). На парном relay — EU_SERVER_DOMAIN.
+# Апекс (duba1e.newip.dev → newip.dev) — каталог сертификатов ~/newip.dev
+# и /etc/ssl/newip.dev. Другой апекс: CERT_DOMAIN="example.com"
 DOMAIN_NAME="REGION.nerabotaet.com"
 
 # Каталог /$SUBS_PATH/update_subs_link

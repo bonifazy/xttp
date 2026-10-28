@@ -19,12 +19,10 @@ source "${SCRIPT_DIR}/.env"
 
 PROJECT_USER="${PROJECT_USER:-dim}"
 BACKUP_DIR="${BACKUP_DIR:-/home/${PROJECT_USER}/backup}"
-SSL_DIR="${SSL_DIR:-/etc/ssl/nerabotaet.com}"
 XRAY_CONFIG="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
 GEODATA_DIR="${GEODATA_DIR:-/usr/local/share/xray}"
 GEODATA_BUNDLE="${GEODATA_BUNDLE:-${SCRIPT_DIR}/geodata}"
 HAPROXY_CFG="${HAPROXY_CFG:-/etc/haproxy/haproxy.cfg}"
-HAPROXY_CERT="${HAPROXY_CERT:-/etc/haproxy/certs/nerabotaet.com.pem}"
 NGINX_SITE="${NGINX_SITE:-/etc/nginx/sites-available/default}"
 SEARXNG_DIR="${SCRIPT_DIR}/searxng"
 SECRETS_FILE="${SCRIPT_DIR}/.xttp_secrets"
@@ -116,6 +114,23 @@ esac
 if [[ -z "$DOMAIN_NAME" || -z "$SUBS_PATH" ]]; then
   _die "В .env пусты DOMAIN_NAME или SUBS_PATH"
 fi
+
+# Wildcard-апекс: duba1e.newip.dev → newip.dev. Override: CERT_DOMAIN в .env.
+# Пара лежит в ~/CERT_DOMAIN, на сервере ещё /etc/ssl/CERT_DOMAIN.
+_apex_domain() {
+  local h="${1:-}"
+  h="${h%.}"
+  h="${h%%:*}"
+  [[ -z "$h" ]] && return 1
+  awk -F. '{ if (NF <= 2) print $0; else print $(NF-1) "." $NF }' <<< "$h"
+}
+CERT_DOMAIN="${CERT_DOMAIN:-$(_apex_domain "$DOMAIN_NAME")}"
+if [[ -z "$CERT_DOMAIN" ]]; then
+  _die "не удалось взять апекс из DOMAIN_NAME=${DOMAIN_NAME}"
+fi
+SSL_DIR="${SSL_DIR:-/etc/ssl/${CERT_DOMAIN}}"
+HAPROXY_CERT="${HAPROXY_CERT:-/etc/haproxy/certs/${CERT_DOMAIN}.pem}"
+HOME_SSL_DIR="${HOME_SSL_DIR:-/home/${PROJECT_USER}/${CERT_DOMAIN}}"
 
 if [[ "$ROLE" == "relay" && -z "$EU_SERVER_LINK" && -z "$EU_SERVER_DOMAIN" ]]; then
   _die "ROLE=relay требует EU_SERVER_LINK или EU_SERVER_DOMAIN в .env"
@@ -539,13 +554,13 @@ write_xray_config() {
   "$PYTHON" - "/tmp/xray-config.json" "$ROLE" "$uuid" "$xhttp_path" "$eu_uuid" \
     "$DOMAIN_NAME" "${EU_SERVER_DOMAIN:-}" "$EU_SERVER_PORT" "${EU_SNI:-}" \
     "$XHTTP_MODE" "$XRAY_XHTTP_LISTEN" "$XRAY_XHTTP_PORT" \
-    "${EU_XHTTP_PATH:-}" "${EU_XHTTP_MODE:-packet-up}" <<'PY'
+    "${EU_XHTTP_PATH:-}" "${EU_XHTTP_MODE:-packet-up}" "${CERT_DOMAIN:-}" <<'PY'
 import json, sys
 
 (
     dst, role, uuid, xhttp_path, eu_uuid, domain, eu_host,
     eu_port, eu_sni, xhttp_mode, xlisten, xport,
-    eu_xhttp_path, eu_xhttp_mode,
+    eu_xhttp_path, eu_xhttp_mode, cert_domain,
 ) = sys.argv[1:]
 xport = int(xport)
 eu_port = int(eu_port) if eu_port else 443
@@ -642,7 +657,11 @@ if role == "relay":
         {"type": "field", "inboundTag": ["dns-eu"], "outboundTag": "eu"},
         {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"},
         {"type": "field", "domain": ["geosite:category-ads-all", "geosite:category-public-tracker"], "outboundTag": "block"},
-        {"type": "field", "domain": [f"full:{domain}", f"full:{eu_host}", "domain:nerabotaet.com"], "outboundTag": "direct"},
+        {"type": "field", "domain": [d for d in (
+            f"full:{domain}" if domain else "",
+            f"full:{eu_host}" if eu_host else "",
+            f"domain:{cert_domain}" if cert_domain else "",
+        ) if d], "outboundTag": "direct"},
         {"type": "field", "domain": ["geosite:category-ru", "regexp:.*\\.ru$", "regexp:.*\\.su$", "domain:xn--p1ai"], "outboundTag": "direct"},
         {"type": "field", "ip": ["geoip:ru", "geoip:private"], "outboundTag": "direct"},
     ]
@@ -882,23 +901,35 @@ install_haproxy_cert() {
 }
 
 install_ssl_certs() {
+  local home_crt="${HOME_SSL_DIR}/fullchain.crt"
+  local home_key="${HOME_SSL_DIR}/cert.key"
+  mkdir -p "$HOME_SSL_DIR"
+  chmod 750 "$HOME_SSL_DIR"
+  chown_project_user "$HOME_SSL_DIR"
+
   if [[ -f /tmp/fullchain.crt && -f /tmp/cert.key ]]; then
-    echo "Установка сертификатов /tmp -> ${SSL_DIR}"
-    sudo install -o root -g root -m 755 -d "$SSL_DIR"
-    sudo install -o root -g root -m 644 /tmp/fullchain.crt "${SSL_DIR}/fullchain.crt"
-    sudo install -o root -g "${XRAY_GROUP}" -m 640 /tmp/cert.key "${SSL_DIR}/cert.key"
+    echo "Сертификаты /tmp -> ${HOME_SSL_DIR}"
+    sudo install -o "${PROJECT_USER}" -g "${PROJECT_USER}" -m 644 /tmp/fullchain.crt "$home_crt"
+    sudo install -o "${PROJECT_USER}" -g "${PROJECT_USER}" -m 640 /tmp/cert.key "$home_key"
     rm -f /tmp/fullchain.crt /tmp/cert.key
+  elif [[ -f "$home_crt" && -f "$home_key" ]]; then
+    echo "Сертификаты ${HOME_SSL_DIR}"
   elif [[ -f "${SSL_DIR}/fullchain.crt" && -f "${SSL_DIR}/cert.key" ]]; then
-    echo "Сертификат ${SSL_DIR}/fullchain.crt установлен"
-    sudo chown root:"${XRAY_GROUP}" "${SSL_DIR}/cert.key"
-    sudo chmod 640 "${SSL_DIR}/cert.key"
+    echo "Сертификаты ${SSL_DIR} -> ${HOME_SSL_DIR}"
+    sudo install -o "${PROJECT_USER}" -g "${PROJECT_USER}" -m 644 "${SSL_DIR}/fullchain.crt" "$home_crt"
+    sudo install -o "${PROJECT_USER}" -g "${PROJECT_USER}" -m 640 "${SSL_DIR}/cert.key" "$home_key"
   else
-    echo "Ошибка: нет ни /tmp/{fullchain.crt,cert.key}, ни ${SSL_DIR}" >&2
+    echo "Ошибка: нет пары fullchain.crt + cert.key" >&2
     IPv4="$(curl -4sS https://api.ipify.org || true)"
-    echo "Для начала работы установите DNS-зоны на текущий ip: ${IPv4}."
-    echo "Затем загрузите сертификаты в /tmp/{fullchain.crt,cert.key}" >&2
+    echo "DNS DOMAIN_NAME (${DOMAIN_NAME}) должен смотреть на ${IPv4}." >&2
+    echo "Положите wildcard ${CERT_DOMAIN} в ${HOME_SSL_DIR}/ или в /tmp/{fullchain.crt,cert.key}" >&2
     exit 1
   fi
+
+  echo "Установка ${HOME_SSL_DIR} -> ${SSL_DIR}"
+  sudo install -o root -g root -m 755 -d "$SSL_DIR"
+  sudo install -o root -g root -m 644 "$home_crt" "${SSL_DIR}/fullchain.crt"
+  sudo install -o root -g "${XRAY_GROUP}" -m 640 "$home_key" "${SSL_DIR}/cert.key"
 }
 
 write_searxng_env() {
