@@ -162,10 +162,9 @@ sudo systemctl restart haproxy
 sleep 1
 sudo systemctl status haproxy --no-pager
 echo ""
-assert_role_frontends
-echo ""
-
 publish_link
+echo ""
+assert_role_frontends
 echo ""
 
 chmod +x "${SCRIPT_DIR}/"*.sh
