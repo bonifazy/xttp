@@ -154,20 +154,9 @@ restart_xray
 sudo systemctl status xray --no-pager
 echo ""
 
-echo "Тест HAProxy"
-sudo haproxy -c -f "$HAPROXY_CFG"
-sudo systemctl unmask haproxy
-sudo systemctl enable haproxy
-sudo systemctl restart haproxy
-sleep 1
-sudo systemctl status haproxy --no-pager
-echo ""
+chmod +x "${SCRIPT_DIR}/"*.sh
 publish_link
 echo ""
-assert_role_frontends
-echo ""
-
-chmod +x "${SCRIPT_DIR}/"*.sh
 
 add_cron() {
   local line="$1"
@@ -184,6 +173,7 @@ add_cron() {
   echo "$line"
 }
 
+# До assert: иначе падение проверки оставляет crontab пустым.
 add_cron "0 6 * * 1 ${SCRIPT_DIR}/update_geodata.sh" "update_geodata.sh"
 add_cron "58 23 * * * truncate -s 0 /var/log/nginx/access.log /var/log/nginx/error.log /var/log/haproxy.log 2>/dev/null || true" "/var/log/nginx/access.log"
 add_cron "59 23 * * * ${SCRIPT_DIR}/clear_xray_logs.sh" "clear_xray_logs.sh"
@@ -194,19 +184,33 @@ current="$(printf '%s\n' "$current" \
   | grep -vF "change_uuid_and_path.sh" \
   | grep -vF "Ротация XTTP UUID для edge EU сервера" \
   | grep -vF "Ротация UUID и XHTTP_PATH для edge EU сервера" \
+  | grep -vF "Ротация UUID и XHTTP_PATH (клиентская ссылка)" \
   | grep -v '^$' || true)"
-if [[ "$ROLE" == "edge" ]]; then
+# relay и edge — клиентская ссылка. backbone: hop в EU_SERVER_LINK, не ротируем.
+if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
+  rot_comment="# Ротация UUID и XHTTP_PATH (клиентская ссылка)"
   printf '%s\n' \
     "$current" \
-    "# Ротация UUID и XHTTP_PATH для edge EU сервера" \
+    "$rot_comment" \
     "1 0 3,7,13,17,23,27 * * ${SCRIPT_DIR}/change_uuid_and_path.sh" \
     | grep -v '^$' | sudo crontab -
-  echo "Cron: change_uuid_and_path.sh (edge: UUID + XHTTP_PATH)"
+  echo "Cron: change_uuid_and_path.sh (${ROLE}: UUID + XHTTP_PATH)"
   echo "1 0 3,7,13,17,23,27 * * ${SCRIPT_DIR}/change_uuid_and_path.sh"
 else
   printf '%s\n' "$current" | grep -v '^$' | sudo crontab - || true
-  echo "Cron: change_uuid_and_path.sh снят (ROLE=${ROLE}, ротации UUID/XHTTP_PATH нет)"
+  echo "Cron: change_uuid_and_path.sh снят (ROLE=${ROLE}, hop не ротируем)"
 fi
+
+echo "Тест HAProxy"
+sudo haproxy -c -f "$HAPROXY_CFG"
+sudo systemctl unmask haproxy
+sudo systemctl enable haproxy
+sudo systemctl restart haproxy
+sleep 1
+sudo systemctl status haproxy --no-pager
+echo ""
+assert_role_frontends
+echo ""
 
 subs_port=443
 if [[ "$ROLE" == "edge" || "$ROLE" == "backbone" ]]; then
