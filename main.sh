@@ -230,3 +230,5 @@ sudo cat "$LINK_FILE"
 echo ""
 echo "Тест с локального компьютера:"
 echo "curl -fsS '${subs_url}'"
+echo ""
+assert_adguard_dns_split

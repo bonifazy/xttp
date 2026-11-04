@@ -1010,16 +1010,21 @@ searxng_stop() {
   fi
 }
 
+# Контейнер AdGuard пишет conf/work от root — dim иначе не открывает yaml.
+adguard_chown_tree() {
+  sudo chown -R "${PROJECT_USER}:${PROJECT_USER}" "${ADGUARD_DIR}/conf" "${ADGUARD_DIR}/work"
+  sudo chmod -R u+rwX,go+rX "${ADGUARD_DIR}/conf" "${ADGUARD_DIR}/work"
+}
+
 # Пишет AdGuardHome.yaml (один раз) и upstreams.txt. Кеш/querylog в adguard/work не трогает.
 write_adguard_config() {
   local conf_dir="${ADGUARD_DIR}/conf"
   local yaml="${conf_dir}/AdGuardHome.yaml"
   local ups="${conf_dir}/upstreams.txt"
-  local ups_tmp
+  local ups_tmp yaml_tmp
   ADGUARD_NEED_RESTART=0
   mkdir -p "$conf_dir" "${ADGUARD_DIR}/work"
-  chown_project_user "$conf_dir"
-  chown_project_user "${ADGUARD_DIR}/work"
+  adguard_chown_tree
   if [[ ! -f "$yaml" ]]; then
     cat > "$yaml" <<EOF
 http:
@@ -1067,7 +1072,9 @@ EOF
     echo "AdGuard: новый ${yaml} (UI ${ADGUARD_UI_ADDR}, без пароля — только localhost)"
   fi
   if [[ -f "$yaml" ]]; then
-    if "$PYTHON" - "$yaml" "$ADGUARD_CACHE_SIZE" "$ADGUARD_CACHE_TTL_MIN" "$ADGUARD_CACHE_TTL_MAX" <<'PY'
+    yaml_tmp="$(mktemp)"
+    sudo cat "$yaml" > "$yaml_tmp"
+    if "$PYTHON" - "$yaml_tmp" "$ADGUARD_CACHE_SIZE" "$ADGUARD_CACHE_TTL_MIN" "$ADGUARD_CACHE_TTL_MAX" <<'PY'
 import re, sys
 path, size, ttl_min, ttl_max = sys.argv[1:]
 text = open(path, encoding="utf-8").read()
@@ -1102,9 +1109,11 @@ if changed:
 sys.exit(1)
 PY
     then
+      sudo install -o "$PROJECT_USER" -g "$PROJECT_USER" -m 644 "$yaml_tmp" "$yaml"
       ADGUARD_NEED_RESTART=1
       echo "AdGuard: кеш size=${ADGUARD_CACHE_SIZE} ttl_min=${ADGUARD_CACHE_TTL_MIN}s ttl_max=${ADGUARD_CACHE_TTL_MAX}"
     fi
+    rm -f "$yaml_tmp"
   fi
   ups_tmp="$(mktemp)"
   "$PYTHON" - "$ROLE" "${EU_SERVER_DOMAIN:-}" "${EU_SNI:-}" "${ADGUARD_VIA_EU_PORT}" <<'PY' > "$ups_tmp"
@@ -1148,15 +1157,12 @@ if role == "relay":
 else:
     print("https://dns.adguard-dns.com/dns-query")
 PY
-  if [[ ! -f "$ups" ]] || ! cmp -s "$ups_tmp" "$ups"; then
-    mv "$ups_tmp" "$ups"
-    chmod 644 "$ups"
-    chown_project_user "$ups"
+  if [[ ! -f "$ups" ]] || ! sudo cmp -s "$ups_tmp" "$ups"; then
+    sudo install -o "$PROJECT_USER" -g "$PROJECT_USER" -m 644 "$ups_tmp" "$ups"
     ADGUARD_NEED_RESTART=1
     echo "AdGuard: апстримы → ${ups}"
-  else
-    rm -f "$ups_tmp"
   fi
+  rm -f "$ups_tmp"
 }
 
 adguard_compose() {
@@ -1182,6 +1188,7 @@ adguard_up() {
     echo "AdGuard: конфиг изменился — restart (RAM-кеш сбросится, querylog на диске)"
     adguard_compose restart
   fi
+  adguard_chown_tree
 }
 
 adguard_stop() {
@@ -1436,4 +1443,108 @@ assert_role_frontends() {
   fi
   echo "подписка отвечает: $url"
   rm -f "$tmp"
+}
+
+# Живой запрос в AdGuard :5353 + query log. Relay: max.ru → Яндекс DoH, instagram.com → :1053 (EU).
+assert_adguard_dns_split() {
+  echo "Проверка DNS AdGuard: max.ru и instagram.com @${ADGUARD_DNS_ADDR}:${ADGUARD_DNS_PORT}"
+  "$PYTHON" - "$ROLE" "$ADGUARD_DNS_ADDR" "$ADGUARD_DNS_PORT" "$ADGUARD_UI_ADDR" <<'PY' || _die "проверка DNS AdGuard не прошла"
+import json, random, socket, struct, sys, time, urllib.error, urllib.request
+
+role, dns_addr, dns_port, ui = sys.argv[1:]
+dns_port = int(dns_port)
+base = "http://" + ui
+
+def encode_name(name):
+    out = b""
+    for label in name.rstrip(".").split("."):
+        raw = label.encode()
+        out += bytes([len(raw)]) + raw
+    return out + b"\x00"
+
+def dns_query(name, timeout=12):
+    tid = random.randint(0, 65535)
+    pkt = struct.pack("!HHHHHH", tid, 0x0100, 1, 0, 0, 0)
+    pkt += encode_name(name) + struct.pack("!HH", 1, 1)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    try:
+        sock.sendto(pkt, (dns_addr, dns_port))
+        data, _ = sock.recvfrom(4096)
+    finally:
+        sock.close()
+    if len(data) < 12:
+        raise RuntimeError(f"{name}: короткий DNS-ответ")
+    flags = struct.unpack("!H", data[2:4])[0]
+    rcode = flags & 0xF
+    if rcode != 0:
+        raise RuntimeError(f"{name}: DNS rcode={rcode}")
+    return True
+
+def http_json(path, method="GET"):
+    data = b"" if method == "POST" else None
+    req = urllib.request.Request(base + path, data=data, method=method)
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        raw = resp.read()
+    if not raw:
+        return {}
+    return json.loads(raw.decode())
+
+def latest_log(host):
+    host = host.rstrip(".").lower()
+    payload = http_json("/control/querylog?limit=40")
+    for entry in payload.get("data") or []:
+        qhost = ((entry.get("question") or {}).get("host") or "").rstrip(".").lower()
+        if qhost == host:
+            return entry
+    return None
+
+try:
+    http_json("/control/cache_clear", method="POST")
+except Exception as exc:
+    print(f"AdGuard cache_clear: {exc} (продолжаем)", file=sys.stderr)
+
+ok = True
+checks = (("max.ru", "yandex"), ("instagram.com", "eu"))
+for host, expect in checks:
+    try:
+        dns_query(host)
+    except Exception as exc:
+        print(f"FAIL {host}: {exc}")
+        ok = False
+        continue
+    entry = None
+    for _ in range(8):
+        time.sleep(0.4)
+        try:
+            entry = latest_log(host)
+        except Exception:
+            entry = None
+        if entry:
+            break
+    if not entry:
+        print(f"FAIL {host}: ответ есть, в query log записи нет (UI {base})")
+        ok = False
+        continue
+    upstream = entry.get("upstream") or ""
+    cached = bool(entry.get("cached"))
+    answers = [a.get("value") for a in (entry.get("answer") or []) if a.get("value")]
+    ips = ", ".join(str(x) for x in answers[:4]) or "-"
+    low = upstream.lower()
+    if expect == "yandex":
+        hit = ("yandex" in low) or ("77.88.8.8" in low)
+        want = "DoH Yandex / 77.88.8.8"
+    else:
+        hit = ("127.0.0.1:1053" in low) or (":1053" in low) or ("94.140.14.14" in low)
+        want = "EU via 127.0.0.1:1053"
+    if role != "relay":
+        print(f"{host}: {ips}  upstream={upstream or '-'}  cached={cached}  (не relay — split не проверяем)")
+        continue
+    if hit:
+        print(f"OK {host}: {ips}  upstream={upstream}  cached={cached}  ({want})")
+    else:
+        print(f"FAIL {host}: {ips}  upstream={upstream or '-'}  cached={cached}  ждали {want}")
+        ok = False
+sys.exit(0 if ok else 1)
+PY
 }
