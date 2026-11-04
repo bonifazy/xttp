@@ -44,7 +44,7 @@ EU_SERVER_LINK=""
 CLIENT_MODE="stream-up"
 
 # DNS: AdGuard Home на 127.0.0.1:5353, UI http://127.0.0.1:3000 (не 80/443).
-# Relay: *.ru — DoH Яндекс / 77.88.8.8 с этой машины. Hop — DNS хостера. Остальное с EU.
+# Relay: *.ru — DoH Яндекс. Hop — DNS хостера. Остальное — DoH Google, затем CF, затем 8.8.8.8/8.8.4.4.
 # Edge/backbone уже в Европе: резолвят сами, :53 из туннеля тоже в этот AdGuard.
 # Кеш в RAM: короткий TTL с апстрима поднимаем до ttl_min, чтобы реже звать Яндекс/EU.
 # ADGUARD_CACHE_TTL_MIN=86400

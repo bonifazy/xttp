@@ -35,7 +35,7 @@ ADGUARD_UI_ADDR="127.0.0.1:3000"
 ADGUARD_VIA_EU_PORT=1053
 # Relay: заглушка dest:53 в туннель. На EU (edge/backbone) порт 53 перехватывает локальный AdGuard.
 ADGUARD_VIA_EU_DEST="${ADGUARD_VIA_EU_DEST:-94.140.14.14}"
-# Кеш AdGuard: min TTL (сек) подменяет короткие ответы, чтобы реже звать Яндекс/EU. 0 max = не резать длинные.
+# Кеш AdGuard: min TTL (сек) подменяет короткие ответы, чтобы реже звать Яндекс/Google. 0 max = не резать длинные.
 ADGUARD_CACHE_SIZE="${ADGUARD_CACHE_SIZE:-134217728}"
 ADGUARD_CACHE_TTL_MIN="${ADGUARD_CACHE_TTL_MIN:-86400}"
 ADGUARD_CACHE_TTL_MAX="${ADGUARD_CACHE_TTL_MAX:-0}"
@@ -553,7 +553,7 @@ publish_link() {
 # Собирает /usr/local/etc/xray/config.json. В xhttpSettings только path и mode.
 # XHTTP-паддинг ядро ставит само (xPaddingBytes 100-1000, Referer x_padding / X-Padding).
 # DNS только в AdGuard 127.0.0.1:5353.
-# relay: *.ru с этой машины (DoH Яндекс / 77.88.8.8); hop — DNS хостера; остальное через EU.
+# relay: *.ru — Яндекс DoH; hop — DNS хостера; остальное — DoH Google, fallback CF / 8.8.8.8 / 8.8.4.4.
 # edge/backbone уже в EU: UDP/TCP 53 с xhttp-in → этот же AdGuard.
 # Все роли: VLESS+XHTTP на 127.0.0.1 (TLS снимает HAProxy).
 # relay outbound: XHTTP packet-up + TLS на backbone.
@@ -1047,6 +1047,10 @@ dns:
   cache_ttl_max: ${ADGUARD_CACHE_TTL_MAX}
   cache_optimistic: true
   ratelimit: 0
+  fallback_dns:
+    - https://cloudflare-dns.com/dns-query
+    - 8.8.8.8
+    - 8.8.4.4
 querylog:
   enabled: true
   file_enabled: true
@@ -1103,6 +1107,19 @@ if missing:
     else:
         text = re.sub(r"^(dns:\n)", r"\1" + block, text, count=1)
     changed = True
+fb = "  fallback_dns:\n    - https://cloudflare-dns.com/dns-query\n    - 8.8.8.8\n    - 8.8.4.4\n"
+fb_pat = re.compile(r"^  fallback_dns:\n(?:    - .*\n)*", re.M)
+m = fb_pat.search(text)
+if m:
+    if m.group(0) != fb:
+        text = fb_pat.sub(fb, text, count=1)
+        changed = True
+elif re.search(r"^  ratelimit:", text, re.M):
+    text = re.sub(r"^(  ratelimit:.*\n)", r"\1" + fb, text, count=1, flags=re.M)
+    changed = True
+else:
+    text = re.sub(r"^(dns:\n)", r"\1" + fb, text, count=1)
+    changed = True
 if changed:
     open(path, "w", encoding="utf-8").write(text)
     sys.exit(0)
@@ -1153,7 +1170,9 @@ if role == "relay":
         print("[/" + "/".join(names) + "/]" + hoster_ns())
     print("[/common.dot.dns.yandex.net/]77.88.8.8")
     print("[/ru/su/xn--p1ai/]https://common.dot.dns.yandex.net/dns-query 77.88.8.8")
-    print(f"127.0.0.1:{via_port}")
+    print("[/dns.google/]8.8.8.8")
+    print("[/cloudflare-dns.com/]1.1.1.1")
+    print("https://dns.google/dns-query")
 else:
     print("https://dns.adguard-dns.com/dns-query")
 PY
@@ -1448,10 +1467,12 @@ assert_role_frontends() {
 # Живой запрос в AdGuard :5353 + query log. Relay: max.ru → Яндекс DoH, instagram.com → :1053 (EU).
 assert_adguard_dns_split() {
   echo "Проверка DNS AdGuard: max.ru и instagram.com @${ADGUARD_DNS_ADDR}:${ADGUARD_DNS_PORT}"
-  "$PYTHON" - "$ROLE" "$ADGUARD_DNS_ADDR" "$ADGUARD_DNS_PORT" "$ADGUARD_UI_ADDR" <<'PY' || _die "проверка DNS AdGuard не прошла"
-import json, random, socket, struct, sys, time, urllib.error, urllib.request
+  adguard_chown_tree
+  "$PYTHON" - "$ROLE" "$ADGUARD_DNS_ADDR" "$ADGUARD_DNS_PORT" "$ADGUARD_UI_ADDR" \
+    "${ADGUARD_DIR}/work" <<'PY' || _die "проверка DNS AdGuard не прошла"
+import glob, json, os, random, socket, struct, sys, time, urllib.error, urllib.request
 
-role, dns_addr, dns_port, ui = sys.argv[1:]
+role, dns_addr, dns_port, ui, work = sys.argv[1:]
 dns_port = int(dns_port)
 base = "http://" + ui
 
@@ -1462,7 +1483,7 @@ def encode_name(name):
         out += bytes([len(raw)]) + raw
     return out + b"\x00"
 
-def dns_query(name, timeout=12):
+def dns_query(name, timeout=20):
     tid = random.randint(0, 65535)
     pkt = struct.pack("!HHHHHH", tid, 0x0100, 1, 0, 0, 0)
     pkt += encode_name(name) + struct.pack("!HH", 1, 1)
@@ -1482,20 +1503,74 @@ def dns_query(name, timeout=12):
     return True
 
 def http_json(path, method="GET"):
-    data = b"" if method == "POST" else None
-    req = urllib.request.Request(base + path, data=data, method=method)
+    body = b"{}" if method == "POST" else None
+    req = urllib.request.Request(base + path, data=body, method=method)
+    req.add_header("Accept", "application/json")
+    if method == "POST":
+        req.add_header("Content-Type", "application/json")
     with urllib.request.urlopen(req, timeout=5) as resp:
         raw = resp.read()
     if not raw:
         return {}
     return json.loads(raw.decode())
 
+def entry_host(entry):
+    q = entry.get("question") if isinstance(entry.get("question"), dict) else {}
+    for src in (q, entry):
+        for key in ("host", "name", "QH", "qh"):
+            val = src.get(key)
+            if val:
+                return str(val).rstrip(".").lower()
+    return ""
+
+def entry_up(entry):
+    for key in ("upstream", "Upstream", "Up"):
+        val = entry.get(key)
+        if val:
+            return str(val)
+    return ""
+
+def entry_ips(entry):
+    out = []
+    for ans in entry.get("answer") or []:
+        if isinstance(ans, dict) and ans.get("value"):
+            out.append(str(ans["value"]))
+    return out
+
+def iter_file_entries():
+    for path in glob.glob(os.path.join(work, "data", "querylog.json*")):
+        try:
+            raw = open(path, encoding="utf-8").read().strip()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        try:
+            if raw[0] == "[":
+                for item in reversed(json.loads(raw)):
+                    yield item
+            else:
+                for line in reversed(raw.splitlines()):
+                    line = line.strip()
+                    if line:
+                        yield json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
 def latest_log(host):
     host = host.rstrip(".").lower()
-    payload = http_json("/control/querylog?limit=40")
-    for entry in payload.get("data") or []:
-        qhost = ((entry.get("question") or {}).get("host") or "").rstrip(".").lower()
-        if qhost == host:
+    try:
+        payload = http_json("/control/querylog?limit=50")
+        items = payload.get("data")
+        if isinstance(items, dict):
+            items = items.get("data") or []
+        for entry in items or []:
+            if entry_host(entry) == host:
+                return entry
+    except Exception as exc:
+        print(f"querylog API: {exc}", file=sys.stderr)
+    for entry in iter_file_entries():
+        if entry_host(entry) == host:
             return entry
     return None
 
@@ -1508,35 +1583,32 @@ ok = True
 checks = (("max.ru", "yandex"), ("instagram.com", "eu"))
 for host, expect in checks:
     try:
-        dns_query(host)
+        dns_query(host, timeout=8)
     except Exception as exc:
         print(f"FAIL {host}: {exc}")
         ok = False
         continue
     entry = None
-    for _ in range(8):
+    for _ in range(10):
         time.sleep(0.4)
-        try:
-            entry = latest_log(host)
-        except Exception:
-            entry = None
+        entry = latest_log(host)
         if entry:
             break
     if not entry:
-        print(f"FAIL {host}: ответ есть, в query log записи нет (UI {base})")
+        print(f"FAIL {host}: ответ есть, в query log записи нет (UI {base}, {work}/data)")
         ok = False
         continue
-    upstream = entry.get("upstream") or ""
-    cached = bool(entry.get("cached"))
-    answers = [a.get("value") for a in (entry.get("answer") or []) if a.get("value")]
-    ips = ", ".join(str(x) for x in answers[:4]) or "-"
+    upstream = entry_up(entry)
+    cached = bool(entry.get("cached") or entry.get("Cached"))
+    ips = ", ".join(entry_ips(entry)[:4]) or "-"
     low = upstream.lower()
     if expect == "yandex":
         hit = ("yandex" in low) or ("77.88.8.8" in low)
         want = "DoH Yandex / 77.88.8.8"
     else:
-        hit = ("127.0.0.1:1053" in low) or (":1053" in low) or ("94.140.14.14" in low)
-        want = "EU via 127.0.0.1:1053"
+        hit = ("dns.google" in low) or ("8.8.8.8" in low) or ("8.8.4.4" in low)
+        hit = hit or ("cloudflare" in low) or ("1.1.1.1" in low)
+        want = "DoH Google / CF / 8.8.8.8"
     if role != "relay":
         print(f"{host}: {ips}  upstream={upstream or '-'}  cached={cached}  (не relay — split не проверяем)")
         continue
