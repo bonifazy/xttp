@@ -36,8 +36,8 @@ ADGUARD_VIA_EU_PORT=1053
 # Relay: заглушка dest:53 в туннель. На EU (edge/backbone) порт 53 перехватывает локальный AdGuard.
 ADGUARD_VIA_EU_DEST="${ADGUARD_VIA_EU_DEST:-94.140.14.14}"
 # Кеш AdGuard: min TTL (сек) подменяет короткие ответы, чтобы реже звать Яндекс/Google. 0 max = не резать длинные.
-ADGUARD_CACHE_SIZE="${ADGUARD_CACHE_SIZE:-134217728}"
-ADGUARD_CACHE_TTL_MIN="${ADGUARD_CACHE_TTL_MIN:-86400}"
+ADGUARD_CACHE_SIZE="${ADGUARD_CACHE_SIZE:-268435456}"
+ADGUARD_CACHE_TTL_MIN="${ADGUARD_CACHE_TTL_MIN:-604800}"
 ADGUARD_CACHE_TTL_MAX="${ADGUARD_CACHE_TTL_MAX:-0}"
 
 # Порт магистрали: из .env, иначе 443.
@@ -1016,17 +1016,11 @@ adguard_chown_tree() {
   sudo chmod -R u+rwX,go+rX "${ADGUARD_DIR}/conf" "${ADGUARD_DIR}/work"
 }
 
-# Пишет AdGuardHome.yaml (один раз) и upstreams.txt. Кеш/querylog в adguard/work не трогает.
-write_adguard_config() {
-  local conf_dir="${ADGUARD_DIR}/conf"
-  local yaml="${conf_dir}/AdGuardHome.yaml"
-  local ups="${conf_dir}/upstreams.txt"
-  local ups_tmp yaml_tmp
-  ADGUARD_NEED_RESTART=0
-  mkdir -p "$conf_dir" "${ADGUARD_DIR}/work"
-  adguard_chown_tree
-  if [[ ! -f "$yaml" ]]; then
-    cat > "$yaml" <<EOF
+write_adguard_base_yaml() {
+  local yaml="$1"
+  local tmp
+  tmp="$(mktemp)"
+  cat > "$tmp" <<EOF
 http:
   address: ${ADGUARD_UI_ADDR}
 dns:
@@ -1070,8 +1064,21 @@ filters:
     id: 1
 schema_version: 27
 EOF
-    chmod 644 "$yaml"
-    chown_project_user "$yaml"
+  sudo install -o "$PROJECT_USER" -g "$PROJECT_USER" -m 644 "$tmp" "$yaml"
+  rm -f "$tmp"
+}
+
+# Пишет AdGuardHome.yaml (один раз) и upstreams.txt. Кеш/querylog в adguard/work не трогает.
+write_adguard_config() {
+  local conf_dir="${ADGUARD_DIR}/conf"
+  local yaml="${conf_dir}/AdGuardHome.yaml"
+  local ups="${conf_dir}/upstreams.txt"
+  local ups_tmp yaml_tmp
+  ADGUARD_NEED_RESTART=0
+  mkdir -p "$conf_dir" "${ADGUARD_DIR}/work"
+  adguard_chown_tree
+  if [[ ! -f "$yaml" ]]; then
+    write_adguard_base_yaml "$yaml"
     ADGUARD_NEED_RESTART=1
     echo "AdGuard: новый ${yaml} (UI ${ADGUARD_UI_ADDR}, без пароля — только localhost)"
   fi
@@ -1087,6 +1094,8 @@ wanted = {
     "cache_ttl_min": ttl_min,
     "cache_ttl_max": ttl_max,
     "cache_optimistic": "true",
+    "cache_optimistic_max_age": "720h",
+    "cache_optimistic_answer_ttl": "24h",
 }
 changed = False
 missing = []
@@ -1099,27 +1108,7 @@ for key, val in wanted.items():
             text = pat.sub(line, text, count=1)
             changed = True
     else:
-        missing.append(line)
-if missing:
-    block = "\n".join(missing) + "\n"
-    if re.search(r"^  cache_size:", text, re.M):
-        text = re.sub(r"^(  cache_size:.*\n)", r"\1" + block, text, count=1, flags=re.M)
-    else:
-        text = re.sub(r"^(dns:\n)", r"\1" + block, text, count=1)
-    changed = True
-fb = "  fallback_dns:\n    - https://cloudflare-dns.com/dns-query\n    - 8.8.8.8\n    - 8.8.4.4\n"
-fb_pat = re.compile(r"^  fallback_dns:\n(?:    - .*\n)*", re.M)
-m = fb_pat.search(text)
-if m:
-    if m.group(0) != fb:
-        text = fb_pat.sub(fb, text, count=1)
-        changed = True
-elif re.search(r"^  ratelimit:", text, re.M):
-    text = re.sub(r"^(  ratelimit:.*\n)", r"\1" + fb, text, count=1, flags=re.M)
-    changed = True
-else:
-    text = re.sub(r"^(dns:\n)", r"\1" + fb, text, count=1)
-    changed = True
+        pass
 if changed:
     open(path, "w", encoding="utf-8").write(text)
     sys.exit(0)
@@ -1132,8 +1121,13 @@ PY
     fi
     rm -f "$yaml_tmp"
   fi
+  local eu_hop="${EU_SERVER_DOMAIN:-}"
+  if [[ -z "$eu_hop" && -n "${EU_SERVER_LINK:-}" ]]; then
+    eu_hop="${EU_SERVER_LINK#*@}"
+    eu_hop="${eu_hop%%[:/?]*}"
+  fi
   ups_tmp="$(mktemp)"
-  "$PYTHON" - "$ROLE" "${EU_SERVER_DOMAIN:-}" "${EU_SNI:-}" "${ADGUARD_VIA_EU_PORT}" <<'PY' > "$ups_tmp"
+  "$PYTHON" - "$ROLE" "$eu_hop" "${EU_SNI:-$eu_hop}" "${ADGUARD_VIA_EU_PORT}" <<'PY' > "$ups_tmp"
 import sys
 role, eu_host, eu_sni, via_port = sys.argv[1:]
 
@@ -1173,6 +1167,9 @@ if role == "relay":
     print("[/dns.google/]8.8.8.8")
     print("[/cloudflare-dns.com/]1.1.1.1")
     print("https://dns.google/dns-query")
+    print("https://cloudflare-dns.com/dns-query")
+    print("8.8.8.8")
+    print("8.8.4.4")
 else:
     print("https://dns.adguard-dns.com/dns-query")
 PY
@@ -1192,9 +1189,44 @@ adguard_compose() {
   fi
 }
 
+# TCP :5353 — AdGuard жив, не ждём апстрим.
+adguard_dns_listening() {
+  "$PYTHON" - "$ADGUARD_DNS_ADDR" "$ADGUARD_DNS_PORT" <<'PY'
+import socket, sys
+addr, port = sys.argv[1], int(sys.argv[2])
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(0.5)
+try:
+    s.connect((addr, port))
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+PY
+}
+
+adguard_wait() {
+  local n
+  for n in $(seq 1 20); do
+    if adguard_dns_listening; then
+      echo "AdGuard слушает ${ADGUARD_DNS_ADDR}:${ADGUARD_DNS_PORT}"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+adguard_print_logs() {
+  echo "--- docker ps xttp-adguard ---" >&2
+  sudo docker ps -a --filter name=xttp-adguard >&2 || true
+  echo "--- docker logs xttp-adguard ---" >&2
+  sudo docker logs --tail 80 xttp-adguard >&2 || true
+}
+
 # Поднимает AdGuard. Restart только если yaml/апстримы новые — иначе RAM-кеш живёт.
 adguard_up() {
-  local running=0
+  local running=0 yaml="${ADGUARD_DIR}/conf/AdGuardHome.yaml"
   write_adguard_config
   if command -v docker >/dev/null 2>&1; then
     if sudo docker ps --format '{{.Names}}' 2>/dev/null | grep -qx xttp-adguard; then
@@ -1207,7 +1239,18 @@ adguard_up() {
     echo "AdGuard: конфиг изменился — restart (RAM-кеш сбросится, querylog на диске)"
     adguard_compose restart
   fi
-  adguard_chown_tree
+  if ! adguard_wait; then
+    echo "AdGuard не слушает :${ADGUARD_DNS_PORT} — пишу запасной yaml и force-recreate"
+    if [[ -f "$yaml" ]]; then
+      sudo cp "$yaml" "${yaml}.bak-$(date +%F_%H%M%S)" || true
+    fi
+    write_adguard_base_yaml "$yaml"
+    adguard_compose up -d --force-recreate --remove-orphans
+    if ! adguard_wait; then
+      adguard_print_logs
+      _die "AdGuard не слушает ${ADGUARD_DNS_ADDR}:${ADGUARD_DNS_PORT}"
+    fi
+  fi
 }
 
 adguard_stop() {
@@ -1573,11 +1616,6 @@ def latest_log(host):
         if entry_host(entry) == host:
             return entry
     return None
-
-try:
-    http_json("/control/cache_clear", method="POST")
-except Exception as exc:
-    print(f"AdGuard cache_clear: {exc} (продолжаем)", file=sys.stderr)
 
 ok = True
 checks = (("max.ru", "yandex"), ("instagram.com", "eu"))
