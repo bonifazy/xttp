@@ -474,19 +474,19 @@ _geodata_file_ok() {
   [[ -f "$f" ]] && [[ "$(stat -c%s "$f" 2>/dev/null || echo 0)" -gt 1000 ]]
 }
 
-# 1) GitHub 10 с  2) зеркала jsDelivr / Fastly  3) иначе локальные geodata/ из репозитория.
+# 1) GitHub 30 с  2) зеркала jsDelivr / Fastly  3) иначе локальные geodata/ из репозитория.
 _fetch_geodat() {
   local dest="$1"
   local github="$2"
   shift 2
-  echo "  1) GitHub (10s): ${github}"
-  if curl -4fsSL --connect-timeout 10 --max-time 10 --retry 0 -o "$dest" "$github" \
+  echo "  1) GitHub (30s): ${github}"
+  if curl -4fsSL --connect-timeout 10 --max-time 30 --retry 0 -o "$dest" "$github" \
     && _geodata_file_ok "$dest"; then
     echo "  ок GitHub"
     return 0
   fi
   rm -f "$dest"
-  echo "  GitHub не успел за 10с"
+  echo "  GitHub не успел за 30с"
   local url
   for url in "$@"; do
     echo "  2) зеркало: ${url}"
