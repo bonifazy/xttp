@@ -3,6 +3,9 @@
 .idea/
 *.log
 searxng/.env
+adguard/work/
+adguard/conf/AdGuardHome.yaml
+adguard/conf/upstreams.txt
 .gopath/
 .gocache/
 .goroot/

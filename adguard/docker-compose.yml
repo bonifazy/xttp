@@ -1,0 +1,13 @@
+name: xttp-adguard
+
+# host network: AdGuard видит 127.0.0.1:1053 (Xray) и 127.0.0.53 (resolved).
+# Слушает только 127.0.0.1:5353 / :3000 — задано в conf/AdGuardHome.yaml, не здесь.
+services:
+  adguardhome:
+    image: docker.io/adguard/adguardhome:latest
+    container_name: xttp-adguard
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./conf:/opt/adguardhome/conf
+      - ./work:/opt/adguardhome/work

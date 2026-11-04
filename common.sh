@@ -25,8 +25,16 @@ GEODATA_BUNDLE="${GEODATA_BUNDLE:-${SCRIPT_DIR}/geodata}"
 HAPROXY_CFG="${HAPROXY_CFG:-/etc/haproxy/haproxy.cfg}"
 NGINX_SITE="${NGINX_SITE:-/etc/nginx/sites-available/default}"
 SEARXNG_DIR="${SCRIPT_DIR}/searxng"
+ADGUARD_DIR="${SCRIPT_DIR}/adguard"
 SECRETS_FILE="${SCRIPT_DIR}/.xttp_secrets"
 PYTHON="${PYTHON:-python3}"
+# AdGuard Home: DNS только localhost. UI не на 80/443 (там HAProxy).
+ADGUARD_DNS_ADDR="127.0.0.1"
+ADGUARD_DNS_PORT=5353
+ADGUARD_UI_ADDR="127.0.0.1:3000"
+ADGUARD_VIA_EU_PORT=1053
+# Relay: AdGuard для чужих имён шлёт сюда через EU. По умолчанию AdGuard DNS, не 1.1.1.1.
+ADGUARD_VIA_EU_DEST="${ADGUARD_VIA_EU_DEST:-94.140.14.14}"
 
 # Порт магистрали: из .env, иначе 443.
 # С RU ALPN на :443 часто режут — для пары relay↔backbone ставят 8443.
@@ -540,6 +548,7 @@ publish_link() {
 
 # Собирает /usr/local/etc/xray/config.json. В xhttpSettings только path и mode.
 # XHTTP-паддинг ядро ставит само (xPaddingBytes 100-1000, Referer x_padding / X-Padding).
+# DNS только в AdGuard 127.0.0.1:5353. Relay: чужие имена AdGuard → :1053 → EU.
 # Все роли: VLESS+XHTTP на 127.0.0.1 (TLS снимает HAProxy).
 # relay outbound: XHTTP packet-up + TLS на backbone.
 # ClientHello-only fragment — патч xray-core (XRAY_HELLO_FRAG в unit), не JSON.
@@ -568,16 +577,21 @@ write_xray_config() {
   "$PYTHON" - "/tmp/xray-config.json" "$ROLE" "$uuid" "$xhttp_path" "$eu_uuid" \
     "$DOMAIN_NAME" "${EU_SERVER_DOMAIN:-}" "$EU_SERVER_PORT" "${EU_SNI:-}" \
     "$XHTTP_MODE" "$XRAY_XHTTP_LISTEN" "$XRAY_XHTTP_PORT" \
-    "${EU_XHTTP_PATH:-}" "${EU_XHTTP_MODE:-packet-up}" "${CERT_DOMAIN:-}" <<'PY'
+    "${EU_XHTTP_PATH:-}" "${EU_XHTTP_MODE:-packet-up}" "${CERT_DOMAIN:-}" \
+    "${ADGUARD_DNS_ADDR}" "${ADGUARD_DNS_PORT}" \
+    "${ADGUARD_VIA_EU_PORT}" "${ADGUARD_VIA_EU_DEST}" <<'PY'
 import json, sys
 
 (
     dst, role, uuid, xhttp_path, eu_uuid, domain, eu_host,
     eu_port, eu_sni, xhttp_mode, xlisten, xport,
     eu_xhttp_path, eu_xhttp_mode, cert_domain,
+    ag_addr, ag_port, via_eu_port, via_eu_dest,
 ) = sys.argv[1:]
 xport = int(xport)
 eu_port = int(eu_port) if eu_port else 443
+ag_port = int(ag_port)
+via_eu_port = int(via_eu_port)
 
 
 def xhttp_settings(path, mode):
@@ -596,6 +610,11 @@ sniff = {
 
 direct = {"protocol": "freedom", "tag": "direct"}
 block = {"protocol": "blackhole", "tag": "block"}
+dns = {
+    "servers": [{"address": ag_addr, "port": ag_port}],
+    "queryStrategy": "UseIPv4",
+    "disableFallbackIfMatch": True,
+}
 
 inbound = {
     "tag": "xhttp-in",
@@ -613,6 +632,7 @@ inbound = {
     },
     "sniffing": sniff,
 }
+inbounds = [inbound]
 
 if role == "relay":
     eu = {
@@ -641,34 +661,19 @@ if role == "relay":
         },
     }
     outbounds = [eu, direct, block]
-    dns = {
-        "servers": [
-            {
-                "address": "8.8.8.8",
-                "domains": [f"full:{domain}", f"full:{eu_host}"],
-                "skipFallback": True,
-                "tag": "dns-direct",
-            },
-            {
-                "address": "77.88.8.8",
-                "domains": [
-                    "geosite:category-ru",
-                    "regexp:.*\\.ru$",
-                    "regexp:.*\\.su$",
-                    "domain:xn--p1ai",
-                ],
-                "skipFallback": True,
-                "tag": "dns-ru",
-            },
-            {"address": "1.1.1.1", "tag": "dns-eu"},
-        ],
-        "queryStrategy": "UseIPv4",
-        "disableFallbackIfMatch": True,
-        "tag": "dns-in",
-    }
+    inbounds.append({
+        "tag": "dns-via-eu",
+        "listen": "127.0.0.1",
+        "port": via_eu_port,
+        "protocol": "dokodemo-door",
+        "settings": {
+            "address": via_eu_dest or "94.140.14.14",
+            "port": 53,
+            "network": "tcp,udp",
+        },
+    })
     rules = [
-        {"type": "field", "inboundTag": ["dns-direct", "dns-ru"], "outboundTag": "direct"},
-        {"type": "field", "inboundTag": ["dns-eu"], "outboundTag": "eu"},
+        {"type": "field", "inboundTag": ["dns-via-eu"], "outboundTag": "eu"},
         {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"},
         {"type": "field", "domain": ["geosite:category-ads-all", "geosite:category-public-tracker"], "outboundTag": "block"},
         {"type": "field", "domain": [d for d in (
@@ -681,11 +686,6 @@ if role == "relay":
     ]
 else:
     outbounds = [direct, block]
-    dns = {
-        "servers": ["1.1.1.1", "8.8.8.8"],
-        "queryStrategy": "UseIPv4",
-        "disableFallbackIfMatch": True,
-    }
     rules = [
         {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"},
         {"type": "field", "domain": ["geosite:category-ads-all", "geosite:category-public-tracker"], "outboundTag": "block"},
@@ -695,7 +695,7 @@ else:
 cfg = {
     "log": log,
     "dns": dns,
-    "inbounds": [inbound],
+    "inbounds": inbounds,
     "outbounds": outbounds,
     "routing": {
         "domainStrategy": "IPIfNonMatch",
@@ -995,6 +995,146 @@ searxng_stop() {
   fi
   if command -v docker >/dev/null 2>&1; then
     searxng_compose stop || true
+  fi
+}
+
+# Пишет AdGuardHome.yaml (один раз) и upstreams.txt. Кеш/querylog в adguard/work не трогает.
+write_adguard_config() {
+  local conf_dir="${ADGUARD_DIR}/conf"
+  local yaml="${conf_dir}/AdGuardHome.yaml"
+  local ups="${conf_dir}/upstreams.txt"
+  local ups_tmp
+  ADGUARD_NEED_RESTART=0
+  mkdir -p "$conf_dir" "${ADGUARD_DIR}/work"
+  chown_project_user "$conf_dir"
+  chown_project_user "${ADGUARD_DIR}/work"
+  if [[ ! -f "$yaml" ]]; then
+    cat > "$yaml" <<EOF
+http:
+  address: ${ADGUARD_UI_ADDR}
+dns:
+  bind_hosts:
+    - 127.0.0.1
+  port: ${ADGUARD_DNS_PORT}
+  upstream_dns_file: /opt/adguardhome/conf/upstreams.txt
+  bootstrap_dns:
+    - 127.0.0.53
+  protection_enabled: true
+  filtering_enabled: true
+  safebrowsing_enabled: false
+  parental_enabled: false
+  safesearch_enabled: false
+  aaaa_disabled: true
+  cache_size: 67108864
+  cache_optimistic: true
+  ratelimit: 0
+querylog:
+  enabled: true
+  file_enabled: true
+  interval: 2160h
+  size_memory: 1000
+statistics:
+  enabled: true
+  interval: 2160h
+tls:
+  enabled: false
+dhcp:
+  enabled: false
+filters:
+  - enabled: true
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
+    name: AdGuard DNS filter
+    id: 1
+schema_version: 27
+EOF
+    chmod 644 "$yaml"
+    chown_project_user "$yaml"
+    ADGUARD_NEED_RESTART=1
+    echo "AdGuard: новый ${yaml} (UI ${ADGUARD_UI_ADDR}, без пароля — только localhost)"
+  fi
+  ups_tmp="$(mktemp)"
+  "$PYTHON" - "$ROLE" "$DOMAIN_NAME" "${EU_SERVER_DOMAIN:-}" "${CERT_DOMAIN:-}" \
+    "${ADGUARD_VIA_EU_PORT}" <<'PY' > "$ups_tmp"
+import sys
+role, domain, eu_host, cert_domain, via_port = sys.argv[1:]
+
+def ok(h):
+    h = (h or "").strip().lower().rstrip(".")
+    if not h or ".." in h:
+        return ""
+    if not all(c.isalnum() or c in ".-" for c in h):
+        return ""
+    return h
+
+def hoster_ns():
+    for path in ("/run/systemd/resolve/resolv.conf", "/etc/resolv.conf"):
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0] == "nameserver":
+                        ip = parts[1]
+                        if ip.startswith("127.") or ip == "::1":
+                            continue
+                        return ip
+        except OSError:
+            continue
+    return "127.0.0.53"
+
+if role == "relay":
+    names = []
+    for h in (domain, eu_host, cert_domain, "ru", "su", "xn--p1ai"):
+        n = ok(h)
+        if n and n not in names:
+            names.append(n)
+    if names:
+        print("[/" + "/".join(names) + "/]" + hoster_ns())
+    print(f"127.0.0.1:{via_port}")
+else:
+    print("https://dns.adguard-dns.com/dns-query")
+PY
+  if [[ ! -f "$ups" ]] || ! cmp -s "$ups_tmp" "$ups"; then
+    mv "$ups_tmp" "$ups"
+    chmod 644 "$ups"
+    chown_project_user "$ups"
+    ADGUARD_NEED_RESTART=1
+    echo "AdGuard: апстримы → ${ups}"
+  else
+    rm -f "$ups_tmp"
+  fi
+}
+
+adguard_compose() {
+  if sudo docker compose version >/dev/null 2>&1; then
+    sudo docker compose -f "${ADGUARD_DIR}/docker-compose.yml" "$@"
+  else
+    sudo docker-compose -f "${ADGUARD_DIR}/docker-compose.yml" "$@"
+  fi
+}
+
+# Поднимает AdGuard. Restart только если yaml/апстримы новые — иначе RAM-кеш живёт.
+adguard_up() {
+  local running=0
+  write_adguard_config
+  if command -v docker >/dev/null 2>&1; then
+    if sudo docker ps --format '{{.Names}}' 2>/dev/null | grep -qx xttp-adguard; then
+      running=1
+    fi
+  fi
+  echo "Запуск AdGuard Home (DNS ${ADGUARD_DNS_ADDR}:${ADGUARD_DNS_PORT}, UI http://${ADGUARD_UI_ADDR})"
+  adguard_compose up -d --remove-orphans
+  if [[ "$running" -eq 1 && "${ADGUARD_NEED_RESTART:-0}" -eq 1 ]]; then
+    echo "AdGuard: конфиг изменился — restart (RAM-кеш сбросится, querylog на диске)"
+    adguard_compose restart
+  fi
+}
+
+adguard_stop() {
+  if [[ ! -f "${ADGUARD_DIR}/docker-compose.yml" ]]; then
+    return 0
+  fi
+  if command -v docker >/dev/null 2>&1; then
+    adguard_compose stop || true
   fi
 }
 

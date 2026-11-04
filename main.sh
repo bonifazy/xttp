@@ -56,7 +56,9 @@ if [[ "$ROLE" == "relay" ]]; then
   else
     echo "HELLO_FRAG: выключен"
   fi
+  echo "AdGuard via EU: 127.0.0.1:${ADGUARD_VIA_EU_PORT} → ${ADGUARD_VIA_EU_DEST}:53"
 fi
+echo "AdGuard DNS: ${ADGUARD_DNS_ADDR}:${ADGUARD_DNS_PORT}  UI: http://${ADGUARD_UI_ADDR}"
 echo ""
 
 ensure_apt_packages python3 curl ca-certificates
@@ -108,6 +110,7 @@ fi
 sudo systemctl enable --now docker
 grant_project_user_admins
 searxng_up
+adguard_up
 echo ""
 
 # Свой Xray из xray-core/xray-linux-* (hello_frag). Релизы XTLS не трогаем.
