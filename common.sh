@@ -33,7 +33,7 @@ ADGUARD_DNS_ADDR="127.0.0.1"
 ADGUARD_DNS_PORT=5353
 ADGUARD_UI_ADDR="127.0.0.1:3000"
 ADGUARD_VIA_EU_PORT=1053
-# Relay: AdGuard для чужих имён шлёт сюда через EU. По умолчанию AdGuard DNS, не 1.1.1.1.
+# Relay: заглушка dest:53 в туннель. На EU (edge/backbone) порт 53 перехватывает локальный AdGuard.
 ADGUARD_VIA_EU_DEST="${ADGUARD_VIA_EU_DEST:-94.140.14.14}"
 
 # Порт магистрали: из .env, иначе 443.
@@ -548,7 +548,9 @@ publish_link() {
 
 # Собирает /usr/local/etc/xray/config.json. В xhttpSettings только path и mode.
 # XHTTP-паддинг ядро ставит само (xPaddingBytes 100-1000, Referer x_padding / X-Padding).
-# DNS только в AdGuard 127.0.0.1:5353. Relay: чужие имена AdGuard → :1053 → EU.
+# DNS только в AdGuard 127.0.0.1:5353.
+# relay: *.ru с этой машины (DoH Яндекс / 77.88.8.8); hop — DNS хостера; остальное через EU.
+# edge/backbone уже в EU: UDP/TCP 53 с xhttp-in → этот же AdGuard.
 # Все роли: VLESS+XHTTP на 127.0.0.1 (TLS снимает HAProxy).
 # relay outbound: XHTTP packet-up + TLS на backbone.
 # ClientHello-only fragment — патч xray-core (XRAY_HELLO_FRAG в unit), не JSON.
@@ -685,8 +687,14 @@ if role == "relay":
         {"type": "field", "ip": ["geoip:ru", "geoip:private"], "outboundTag": "direct"},
     ]
 else:
-    outbounds = [direct, block]
+    dns_local = {
+        "protocol": "freedom",
+        "tag": "dns-local",
+        "settings": {"redirect": f"{ag_addr}:{ag_port}"},
+    }
+    outbounds = [direct, block, dns_local]
     rules = [
+        {"type": "field", "inboundTag": ["xhttp-in"], "port": 53, "outboundTag": "dns-local"},
         {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"},
         {"type": "field", "domain": ["geosite:category-ads-all", "geosite:category-public-tracker"], "outboundTag": "block"},
         {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"},
@@ -1053,10 +1061,9 @@ EOF
     echo "AdGuard: новый ${yaml} (UI ${ADGUARD_UI_ADDR}, без пароля — только localhost)"
   fi
   ups_tmp="$(mktemp)"
-  "$PYTHON" - "$ROLE" "$DOMAIN_NAME" "${EU_SERVER_DOMAIN:-}" "${CERT_DOMAIN:-}" \
-    "${ADGUARD_VIA_EU_PORT}" <<'PY' > "$ups_tmp"
+  "$PYTHON" - "$ROLE" "${EU_SERVER_DOMAIN:-}" "${EU_SNI:-}" "${ADGUARD_VIA_EU_PORT}" <<'PY' > "$ups_tmp"
 import sys
-role, domain, eu_host, cert_domain, via_port = sys.argv[1:]
+role, eu_host, eu_sni, via_port = sys.argv[1:]
 
 def ok(h):
     h = (h or "").strip().lower().rstrip(".")
@@ -1083,12 +1090,14 @@ def hoster_ns():
 
 if role == "relay":
     names = []
-    for h in (domain, eu_host, cert_domain, "ru", "su", "xn--p1ai"):
+    for h in (eu_host, eu_sni):
         n = ok(h)
         if n and n not in names:
             names.append(n)
     if names:
         print("[/" + "/".join(names) + "/]" + hoster_ns())
+    print("[/common.dot.dns.yandex.net/]77.88.8.8")
+    print("[/ru/su/xn--p1ai/]https://common.dot.dns.yandex.net/dns-query 77.88.8.8")
     print(f"127.0.0.1:{via_port}")
 else:
     print("https://dns.adguard-dns.com/dns-query")

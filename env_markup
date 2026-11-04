@@ -44,6 +44,5 @@ EU_SERVER_LINK=""
 CLIENT_MODE="stream-up"
 
 # DNS: AdGuard Home на 127.0.0.1:5353, UI http://127.0.0.1:3000 (не 80/443).
-# Кеш домен→IP в RAM, querylog в ~/xttp/adguard/work. 8.8.8.8/1.1.1.1 Xray не зовёт.
-# Relay: свои/.ru через 127.0.0.53, остальное через EU на этот IP (AdGuard DNS).
-# ADGUARD_VIA_EU_DEST="94.140.14.14"
+# Relay: *.ru — DoH Яндекс / 77.88.8.8 с этой машины. Hop — DNS хостера. Остальное с EU.
+# Edge/backbone уже в Европе: резолвят сами, :53 из туннеля тоже в этот AdGuard.
