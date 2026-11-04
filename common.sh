@@ -35,6 +35,10 @@ ADGUARD_UI_ADDR="127.0.0.1:3000"
 ADGUARD_VIA_EU_PORT=1053
 # Relay: заглушка dest:53 в туннель. На EU (edge/backbone) порт 53 перехватывает локальный AdGuard.
 ADGUARD_VIA_EU_DEST="${ADGUARD_VIA_EU_DEST:-94.140.14.14}"
+# Кеш AdGuard: min TTL (сек) подменяет короткие ответы, чтобы реже звать Яндекс/EU. 0 max = не резать длинные.
+ADGUARD_CACHE_SIZE="${ADGUARD_CACHE_SIZE:-134217728}"
+ADGUARD_CACHE_TTL_MIN="${ADGUARD_CACHE_TTL_MIN:-86400}"
+ADGUARD_CACHE_TTL_MAX="${ADGUARD_CACHE_TTL_MAX:-0}"
 
 # Порт магистрали: из .env, иначе 443.
 # С RU ALPN на :443 часто режут — для пары relay↔backbone ставят 8443.
@@ -1033,7 +1037,9 @@ dns:
   parental_enabled: false
   safesearch_enabled: false
   aaaa_disabled: true
-  cache_size: 67108864
+  cache_size: ${ADGUARD_CACHE_SIZE}
+  cache_ttl_min: ${ADGUARD_CACHE_TTL_MIN}
+  cache_ttl_max: ${ADGUARD_CACHE_TTL_MAX}
   cache_optimistic: true
   ratelimit: 0
 querylog:
@@ -1059,6 +1065,46 @@ EOF
     chown_project_user "$yaml"
     ADGUARD_NEED_RESTART=1
     echo "AdGuard: новый ${yaml} (UI ${ADGUARD_UI_ADDR}, без пароля — только localhost)"
+  fi
+  if [[ -f "$yaml" ]]; then
+    if "$PYTHON" - "$yaml" "$ADGUARD_CACHE_SIZE" "$ADGUARD_CACHE_TTL_MIN" "$ADGUARD_CACHE_TTL_MAX" <<'PY'
+import re, sys
+path, size, ttl_min, ttl_max = sys.argv[1:]
+text = open(path, encoding="utf-8").read()
+wanted = {
+    "cache_size": size,
+    "cache_ttl_min": ttl_min,
+    "cache_ttl_max": ttl_max,
+    "cache_optimistic": "true",
+}
+changed = False
+missing = []
+for key, val in wanted.items():
+    line = f"  {key}: {val}"
+    pat = re.compile(rf"^  {re.escape(key)}:.*$", re.M)
+    m = pat.search(text)
+    if m:
+        if m.group(0) != line:
+            text = pat.sub(line, text, count=1)
+            changed = True
+    else:
+        missing.append(line)
+if missing:
+    block = "\n".join(missing) + "\n"
+    if re.search(r"^  cache_size:", text, re.M):
+        text = re.sub(r"^(  cache_size:.*\n)", r"\1" + block, text, count=1, flags=re.M)
+    else:
+        text = re.sub(r"^(dns:\n)", r"\1" + block, text, count=1)
+    changed = True
+if changed:
+    open(path, "w", encoding="utf-8").write(text)
+    sys.exit(0)
+sys.exit(1)
+PY
+    then
+      ADGUARD_NEED_RESTART=1
+      echo "AdGuard: кеш size=${ADGUARD_CACHE_SIZE} ttl_min=${ADGUARD_CACHE_TTL_MIN}s ttl_max=${ADGUARD_CACHE_TTL_MAX}"
+    fi
   fi
   ups_tmp="$(mktemp)"
   "$PYTHON" - "$ROLE" "${EU_SERVER_DOMAIN:-}" "${EU_SNI:-}" "${ADGUARD_VIA_EU_PORT}" <<'PY' > "$ups_tmp"
