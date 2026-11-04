@@ -13,8 +13,10 @@ ROLE="edge"
 # и /etc/ssl/newip.dev. Другой апекс: CERT_DOMAIN="example.com"
 DOMAIN_NAME="REGION.nerabotaet.com"
 
-# Каталог /$SUBS_PATH/update_subs_link
-SUBS_PATH="uuid-каталог-подписки"
+# SUBS_PATH не задаём: main.sh каждый запуск делает случайный путь 12–32 символа.
+
+# Почта Let's Encrypt (если нет /tmp/fullchain.crt + cert.key).
+ACME_EMAIL="you@example.com"
 
 # IP через пробел: подписка только им + ufw allow from (все порты).
 # Пусто — main.sh не падает, ufw from нет, подписка без ACL. "*" — всем, ufw from нет.
@@ -34,7 +36,7 @@ EU_SERVER_PORT=8443
 # HELLO_FRAG_LENGTH="80-120"
 # HELLO_FRAG_INTERVAL="8-20"
 
-# Relay: постоянная vless-ссылка backbone. Если задана — подписку не качаем.
+# Relay: постоянная vless-ссылка backbone (обязательна: путь подписки backbone каждый main.sh новый).
 # EU_SERVER_LINK="vless://uuid@eu.nerabotaet.com:8443?encryption=none&security=tls&sni=eu.nerabotaet.com&fp=chrome&alpn=h2&type=xhttp&path=%2Fsecret&mode=packet-up"
 EU_SERVER_LINK=""
 

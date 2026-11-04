@@ -2,12 +2,12 @@
 #
 # Перед ./main.sh:
 #   1. .env из env_markup — ROLE и переменные для этой роли
-#   2. Wildcard-пара в ~/CERT_DOMAIN/{fullchain.crt,cert.key} или /tmp
-#      (апекс из DOMAIN_NAME: duba1e.newip.dev → ~/newip.dev)
+#   2. Сертификаты: /tmp/{fullchain.crt,cert.key} (купленный wildcard) или
+#      Let's Encrypt на DOMAIN_NAME (ACME_EMAIL в .env, автообновление)
 #   3. DNS DOMAIN_NAME смотрит на этот VPS
-#   4. ROLE=relay: в .env EU_SERVER_LINK = постоянная vless-ссылка backbone
-#      (XHTTP packet-up). Если пусто — качаем /$SUBS_PATH/update_subs_link
-#      (IP relay в ALLOWED_IP).
+#   4. ROLE=relay: EU_SERVER_LINK = постоянная vless-ссылка backbone
+#      (XHTTP packet-up). Подписку backbone не качаем: SUBS_PATH каждый
+#      main.sh новый.
 #
 # Идемпотентно: .xttp_secrets не перезаписывает. Конфиги собирает заново.
 # ROLE=relay/edge: клиентская ссылка — XHTTP stream-up + alpn=h2 (HAProxy proto h2).
@@ -19,13 +19,16 @@ set -euo pipefail
 # shellcheck disable=SC1091
 source /home/dim/xttp/common.sh
 
+SUBS_PATH="$(generate_subs_path)"
+LINK_FILE="/var/www/html/${SUBS_PATH}/update_subs_link"
+
 echo ""
 echo "ROLE: $ROLE"
 echo "DOMAIN_NAME: $DOMAIN_NAME"
 echo "CERT_DOMAIN: $CERT_DOMAIN"
 echo "HOME_SSL_DIR: $HOME_SSL_DIR"
 echo "SSL_DIR: $SSL_DIR"
-echo "SUBS_PATH: $SUBS_PATH"
+echo "SUBS_PATH: $SUBS_PATH (новый при этом запуске)"
 if [[ -n "$ALLOWED_IP" ]]; then
   echo "ALLOWED_IP: $ALLOWED_IP"
 else

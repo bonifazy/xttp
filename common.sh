@@ -47,15 +47,15 @@ DECOY_ADDR="127.0.0.1:8888"
 XRAY_USER="${XRAY_USER:-nobody}"
 XRAY_GROUP="${XRAY_GROUP:-nogroup}"
 
-LINK_FILE="${LINK_FILE:-/var/www/html/${SUBS_PATH:-}/update_subs_link}"
-
 ROLE="${ROLE:-edge}"
 DOMAIN_NAME="${DOMAIN_NAME:-}"
-SUBS_PATH="${SUBS_PATH:-}"
+# SUBS_PATH из .env игнорируем: main.sh генерирует, остальные скрипты берут из secrets.
+unset SUBS_PATH
 ALLOWED_IP="${ALLOWED_IP:-}"
 EU_SERVER_DOMAIN="${EU_SERVER_DOMAIN:-}"
 EU_SERVER_LINK="${EU_SERVER_LINK:-}"
 CLIENT_MODE="${CLIENT_MODE:-stream-up}"
+ACME_EMAIL="${ACME_EMAIL:-}"
 EU_SNI="${EU_SERVER_DOMAIN}"
 EU_XHTTP_PATH="${EU_XHTTP_PATH:-}"
 
@@ -64,6 +64,9 @@ if [[ -f "$SECRETS_FILE" ]]; then
   # shellcheck disable=SC1091
   source "$SECRETS_FILE"
 fi
+
+SUBS_PATH="${SUBS_PATH:-}"
+LINK_FILE="/var/www/html/${SUBS_PATH}/update_subs_link"
 
 _die() {
   echo "$*" >&2
@@ -111,8 +114,8 @@ case "$ROLE" in
   *) _die "ROLE должен быть relay, edge или backbone. Сейчас: '${ROLE}'" ;;
 esac
 
-if [[ -z "$DOMAIN_NAME" || -z "$SUBS_PATH" ]]; then
-  _die "В .env пусты DOMAIN_NAME или SUBS_PATH"
+if [[ -z "$DOMAIN_NAME" ]]; then
+  _die "В .env пуст DOMAIN_NAME"
 fi
 
 # Wildcard-апекс: duba1e.newip.dev → newip.dev. Override: CERT_DOMAIN в .env.
@@ -132,8 +135,8 @@ SSL_DIR="${SSL_DIR:-/etc/ssl/${CERT_DOMAIN}}"
 HAPROXY_CERT="${HAPROXY_CERT:-/etc/haproxy/certs/${CERT_DOMAIN}.pem}"
 HOME_SSL_DIR="${HOME_SSL_DIR:-/home/${PROJECT_USER}/${CERT_DOMAIN}}"
 
-if [[ "$ROLE" == "relay" && -z "$EU_SERVER_LINK" && -z "$EU_SERVER_DOMAIN" ]]; then
-  _die "ROLE=relay требует EU_SERVER_LINK или EU_SERVER_DOMAIN в .env"
+if [[ "$ROLE" == "relay" && -z "$EU_SERVER_LINK" ]]; then
+  _die "ROLE=relay требует EU_SERVER_LINK в .env (SUBS_PATH на backbone каждый main.sh новый)"
 fi
 
 if [[ ! "$EU_SERVER_PORT" =~ ^[0-9]+$ ]] || [[ "$EU_SERVER_PORT" -lt 1 || "$EU_SERVER_PORT" -gt 65535 ]]; then
@@ -222,6 +225,16 @@ generate_uuid() {
   fi
 }
 
+# Каталог подписки: 12–32 символа [A-Za-z0-9], длина каждый раз разная.
+generate_subs_path() {
+  "$PYTHON" - <<'PY'
+import random, secrets, string
+n = random.randint(12, 32)
+alphabet = string.ascii_letters + string.digits
+print("".join(secrets.choice(alphabet) for _ in range(n)))
+PY
+}
+
 # Пишет .xttp_secrets текущими UUID / XHTTP_PATH / hop EU_*.
 # umask 077 + chmod 600 + dim:dim, даже если пишет root из cron.
 write_secrets() {
@@ -229,6 +242,7 @@ write_secrets() {
   {
     printf 'UUID=%s\n' "${UUID:-}"
     printf 'XHTTP_PATH=%s\n' "${XHTTP_PATH:-}"
+    printf 'SUBS_PATH=%s\n' "${SUBS_PATH:-}"
     if [[ "$ROLE" == "relay" ]]; then
       printf 'EU_UUID=%s\n' "${EU_UUID:-}"
       printf 'EU_XHTTP_PATH=%s\n' "${EU_XHTTP_PATH:-}"
@@ -760,11 +774,11 @@ if ips:
     use_subs = "use_backend be_subs if is_subs subs_ok"
 bind_ssl = f"    bind :{tls_port} ssl crt {cert} alpn h2,http/1.1"
 if tls_port == 443:
-    redir = "    http-request redirect scheme https code 301 unless { ssl_fc }"
+    redir = "    http-request redirect scheme https code 301 unless { ssl_fc || is_acme }"
 else:
     redir = (
         f"    http-request redirect location https://%[hdr(host),field(1,:)]:{tls_port}%[capture.req.uri] "
-        "unless { ssl_fc }"
+        "unless { ssl_fc || is_acme }"
     )
 cfg = f"""global
     log /dev/log local0 info
@@ -804,10 +818,12 @@ frontend fe_tls
 {redir}
     http-response set-header Strict-Transport-Security "max-age=31536000"
 
+    acl is_acme  path_beg /.well-known/acme-challenge/
     acl is_xhttp path_beg {xhttp}
     acl is_subs  path {subs_path}
 {acl_ok}    http-request set-log-level silent if is_xhttp
 
+    use_backend be_subs if is_acme
     use_backend be_xray if is_xhttp
     {use_subs}
     default_backend be_decoy
@@ -863,6 +879,11 @@ server {{
     root /var/www/html;
     index index.html;
     server_name _;
+
+    location ^~ /.well-known/acme-challenge/ {{
+        root /var/www/html;
+        default_type text/plain;
+    }}
 
     location = /{subs}/update_subs_link {{
         if ($subs_ok = 0) {{
