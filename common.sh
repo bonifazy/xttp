@@ -295,18 +295,26 @@ write_secrets() {
 }
 
 # Первый запуск: UUID и XHTTP_PATH. Повторный — только читает.
+# SUBS_PATH, который уже выставил main.sh, secrets не затирает.
 ensure_secrets() {
+  local keep_subs="${SUBS_PATH:-}"
   if [[ ! -f "$SECRETS_FILE" ]]; then
     echo "Нет .xttp_secrets — генерирую UUID"
     UUID="$(generate_uuid)"
     XHTTP_PATH="/$(generate_uuid)"
     echo "XHTTP_PATH сгенерирован"
+    [[ -n "$keep_subs" ]] && SUBS_PATH="$keep_subs"
     write_secrets
+    LINK_FILE="/var/www/html/${SUBS_PATH}/update_subs_link"
     return 0
   fi
   # shellcheck source=/home/dim/xttp/.xttp_secrets
   # shellcheck disable=SC1091
   source "$SECRETS_FILE"
+  if [[ -n "$keep_subs" ]]; then
+    SUBS_PATH="$keep_subs"
+  fi
+  LINK_FILE="/var/www/html/${SUBS_PATH}/update_subs_link"
   if [[ -z "${UUID:-}" ]]; then
     _die "В .xttp_secrets нет UUID"
   fi

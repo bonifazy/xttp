@@ -128,6 +128,8 @@ install_geodata
 echo ""
 
 ensure_secrets
+write_secrets
+LINK_FILE="/var/www/html/${SUBS_PATH}/update_subs_link"
 echo "UUID: $UUID"
 if [[ -n "${XHTTP_PATH:-}" ]]; then
   echo "XHTTP_PATH: $XHTTP_PATH"
