@@ -41,11 +41,8 @@ if [[ "$ROLE" == "relay" ]]; then
   echo "EU_SERVER_DOMAIN: $EU_SERVER_DOMAIN"
   echo "EU_SERVER_PORT: $EU_SERVER_PORT"
 fi
-if [[ "$ROLE" == "backbone" ]]; then
-  echo "EU_SERVER_PORT: $EU_SERVER_PORT"
-fi
+echo "CLIENT_PORT: $CLIENT_PORT"
 if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
-  echo "CLIENT_PORT: $CLIENT_PORT"
   echo "DOWNLOAD_PORT: ${DOWNLOAD_LISTEN:-0}"
   echo "CLIENT_MODE: $CLIENT_MODE"
 fi
@@ -157,7 +154,7 @@ sleep 1
 sudo systemctl status nginx --no-pager
 echo ""
 
-# Xray раньше HAProxy: на старом backbone :EU_SERVER_PORT держал Xray (Vision).
+# Xray раньше HAProxy: на старом backbone :CLIENT_PORT держал Xray (Vision).
 echo "systemctl enable --now / restart xray"
 sudo systemctl daemon-reload
 sudo systemctl enable xray

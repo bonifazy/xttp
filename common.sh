@@ -43,8 +43,8 @@ ADGUARD_CACHE_TTL_MAX="${ADGUARD_CACHE_TTL_MAX:-0}"
 # Порт магистрали hop: из .env, иначе 443.
 # С RU ALPN на :443 часто режут — для пары relay↔backbone ставят 8443.
 EU_SERVER_PORT="${EU_SERVER_PORT:-443}"
-# Телефон POST. Relay и edge одинаково: пусто → 443. Backbone пусто → EU_SERVER_PORT.
-CLIENT_PORT="${CLIENT_PORT:-}"
+# Публичный TLS (все роли). Иначе 443. Relay/edge: POST телефона.
+CLIENT_PORT="${CLIENT_PORT:-443}"
 # Клиентский GET (downloadSettings). 0 — выкл. Пусто — 8443, если POST уже 8443 — 443.
 DOWNLOAD_PORT="${DOWNLOAD_PORT:-}"
 DOWNLOAD_HOST="${DOWNLOAD_HOST:-}"
@@ -161,13 +161,6 @@ if [[ ! "$EU_SERVER_PORT" =~ ^[0-9]+$ ]] || [[ "$EU_SERVER_PORT" -lt 1 || "$EU_S
   _die "EU_SERVER_PORT должен быть 1-65535. Сейчас: '${EU_SERVER_PORT}'"
 fi
 
-if [[ -z "$CLIENT_PORT" ]]; then
-  if [[ "$ROLE" == "backbone" ]]; then
-    CLIENT_PORT="$EU_SERVER_PORT"
-  else
-    CLIENT_PORT=443
-  fi
-fi
 if [[ ! "$CLIENT_PORT" =~ ^[0-9]+$ ]] || [[ "$CLIENT_PORT" -lt 1 || "$CLIENT_PORT" -gt 65535 ]]; then
   _die "CLIENT_PORT должен быть 1-65535. Сейчас: '${CLIENT_PORT}'"
 fi
@@ -497,7 +490,7 @@ resolve_relay_eu_uuid() {
 # Качает подписку с backbone. Пишет vless:// в stdout.
 fetch_eu_link() {
   local url code tmp link
-  url="$(https_url "$EU_SERVER_DOMAIN" "${SUBS_PATH}/update_subs_link")"
+  url="$(https_url "$EU_SERVER_DOMAIN" "${SUBS_PATH}/update_subs_link" "$EU_SERVER_PORT")"
   tmp="$(mktemp)"
   echo "Запрос EU hop: $url" >&2
   code="$(curl -4sS --http1.1 -o "$tmp" -w '%{http_code}' --retry 3 --retry-delay 2 --max-time 20 "$url" || true)"
@@ -1532,7 +1525,7 @@ _wait_haproxy_port() {
 }
 
 # Xray должен быть active на любой роли. Иначе HAProxy отдаёт 502 на XHTTP path
-# (подписка при этом 200 — как на Helsinki). Backbone: ещё HAProxy на :EU_SERVER_PORT.
+# (подписка при этом 200 — как на Helsinki). Backbone: ещё HAProxy на :CLIENT_PORT.
 # relay/edge: второй bind DOWNLOAD_LISTEN и extra= в подписке.
 assert_role_frontends() {
   local tls_port="$CLIENT_PORT"

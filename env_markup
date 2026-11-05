@@ -1,7 +1,7 @@
 # Скопируйте в .env и заполните строки для своей роли.
 # relay — RU: телефон → HAProxy :CLIENT_PORT XHTTP → backbone packet-up
 # edge — EU для клиентов: HAProxy :CLIENT_PORT XHTTP → freedom
-# backbone — EU: HAProxy :EU_SERVER_PORT, принимает relay
+# backbone — EU: HAProxy :CLIENT_PORT, принимает relay
 #
 # XHTTP: packet-up — hop/CDN; stream-up — телефон напрямую; auto — inbound.
 # stream-one не используем (Vision). Паддинг ядро ставит само.
@@ -25,11 +25,12 @@ ALLOWED_IP="1.2.3.4"
 # Парный backbone (relay, если нет EU_SERVER_LINK).
 EU_SERVER_DOMAIN="EUR_REGION.nerabotaet.com"
 
-# Hop relay→backbone и публичный TLS backbone. Иначе 443. С RU на :443 часто режут — тогда 8443.
+# Hop relay→backbone (порт в EU_SERVER_LINK). Не слушатель этого VPS.
 EU_SERVER_PORT=8443
 
-# Телефон, одинаково relay и edge: POST=CLIENT_PORT, GET=DOWNLOAD_PORT (extra.downloadSettings).
+# Публичный TLS, все роли. Иначе 443. Relay/edge: POST; GET = DOWNLOAD_PORT.
 # Пустой DOWNLOAD_PORT: 8443, если CLIENT_PORT уже 8443 — тогда 443. 0 — без split.
+# Backbone extra не ставит — hop один XHTTP.
 CLIENT_PORT=443
 DOWNLOAD_PORT=8443
 # DOWNLOAD_HOST=""
