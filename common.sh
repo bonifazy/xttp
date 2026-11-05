@@ -40,10 +40,12 @@ ADGUARD_CACHE_SIZE="${ADGUARD_CACHE_SIZE:-268435456}"
 ADGUARD_CACHE_TTL_MIN="${ADGUARD_CACHE_TTL_MIN:-604800}"
 ADGUARD_CACHE_TTL_MAX="${ADGUARD_CACHE_TTL_MAX:-0}"
 
-# Порт магистрали: из .env, иначе 443.
+# Порт магистрали hop: из .env, иначе 443.
 # С RU ALPN на :443 часто режут — для пары relay↔backbone ставят 8443.
 EU_SERVER_PORT="${EU_SERVER_PORT:-443}"
-# Клиентский GET (downloadSettings). 0 — выкл. Пусто — 8443, если аплинк уже 8443 — 443.
+# Телефон POST. Relay и edge одинаково: пусто → 443. Backbone пусто → EU_SERVER_PORT.
+CLIENT_PORT="${CLIENT_PORT:-}"
+# Клиентский GET (downloadSettings). 0 — выкл. Пусто — 8443, если POST уже 8443 — 443.
 DOWNLOAD_PORT="${DOWNLOAD_PORT:-}"
 DOWNLOAD_HOST="${DOWNLOAD_HOST:-}"
 DOWNLOAD_LISTEN=""
@@ -159,11 +161,21 @@ if [[ ! "$EU_SERVER_PORT" =~ ^[0-9]+$ ]] || [[ "$EU_SERVER_PORT" -lt 1 || "$EU_S
   _die "EU_SERVER_PORT должен быть 1-65535. Сейчас: '${EU_SERVER_PORT}'"
 fi
 
-# relay/edge: второй вход в тот же HAProxy. Телефон POST→основной, GET→DOWNLOAD_LISTEN.
+if [[ -z "$CLIENT_PORT" ]]; then
+  if [[ "$ROLE" == "backbone" ]]; then
+    CLIENT_PORT="$EU_SERVER_PORT"
+  else
+    CLIENT_PORT=443
+  fi
+fi
+if [[ ! "$CLIENT_PORT" =~ ^[0-9]+$ ]] || [[ "$CLIENT_PORT" -lt 1 || "$CLIENT_PORT" -gt 65535 ]]; then
+  _die "CLIENT_PORT должен быть 1-65535. Сейчас: '${CLIENT_PORT}'"
+fi
+
+# relay/edge: второй вход в тот же HAProxy. Телефон POST→CLIENT_PORT, GET→DOWNLOAD_LISTEN.
 DOWNLOAD_HOST="${DOWNLOAD_HOST:-$DOMAIN_NAME}"
 if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
-  _up_port=443
-  [[ "$ROLE" == "edge" ]] && _up_port="$EU_SERVER_PORT"
+  _up_port="$CLIENT_PORT"
   if [[ "${DOWNLOAD_PORT}" == "0" ]]; then
     DOWNLOAD_LISTEN=""
   elif [[ -n "${DOWNLOAD_PORT}" ]]; then
@@ -178,7 +190,7 @@ if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
       _die "DOWNLOAD_PORT должен быть 1-65535 или 0. Сейчас: '${DOWNLOAD_LISTEN}'"
     fi
     if [[ "$DOWNLOAD_LISTEN" == "$_up_port" ]]; then
-      _die "DOWNLOAD_PORT=${DOWNLOAD_LISTEN} совпадает с клиентским :${_up_port}. Другой порт или 0."
+      _die "DOWNLOAD_PORT=${DOWNLOAD_LISTEN} совпадает с CLIENT_PORT=${CLIENT_PORT}. Другой порт или 0."
     fi
   fi
   unset _up_port
@@ -351,13 +363,10 @@ build_vless_link() {
     echo "build_vless_link: нет XHTTP_PATH" >&2
     return 1
   fi
-  local client_port=443
+  local client_port="$CLIENT_PORT"
   local mode="$CLIENT_MODE"
   local dl_host="${DOWNLOAD_HOST:-$DOMAIN_NAME}"
   local dl_port=""
-  if [[ "$ROLE" == "edge" || "$ROLE" == "backbone" ]]; then
-    client_port="$EU_SERVER_PORT"
-  fi
   if [[ "$ROLE" == "backbone" ]]; then
     mode="${EU_XHTTP_MODE:-packet-up}"
   fi
@@ -509,15 +518,11 @@ fetch_eu_link() {
 
 apply_ufw() {
   local ip
-  if [[ "$ROLE" == "relay" ]]; then
-    sudo ufw allow 80/tcp comment "HTTP redirect"
-    sudo ufw allow 443/tcp comment "HTTPS"
-  elif [[ "$ROLE" == "edge" ]]; then
-    sudo ufw allow 80/tcp comment "HTTP redirect"
-    sudo ufw allow "${EU_SERVER_PORT}/tcp" comment "HTTPS"
-  elif [[ "$ROLE" == "backbone" ]]; then
-    sudo ufw allow 80/tcp comment "HTTP redirect"
-    sudo ufw allow "${EU_SERVER_PORT}/tcp" comment "HTTPS backbone"
+  sudo ufw allow 80/tcp comment "HTTP redirect"
+  if [[ "$ROLE" == "backbone" ]]; then
+    sudo ufw allow "${CLIENT_PORT}/tcp" comment "HTTPS backbone"
+  else
+    sudo ufw allow "${CLIENT_PORT}/tcp" comment "HTTPS"
   fi
   if [[ -n "${DOWNLOAD_LISTEN:-}" ]]; then
     sudo ufw allow "${DOWNLOAD_LISTEN}/tcp" comment "HTTPS download"
@@ -799,12 +804,9 @@ write_haproxy_config() {
     echo "write_haproxy_config: нет XHTTP_PATH" >&2
     return 1
   fi
-  local tls_port=443
+  local tls_port="$CLIENT_PORT"
   local h2_fe_be=0
   local hap_ver hap_maj hap_min
-  if [[ "$ROLE" == "edge" || "$ROLE" == "backbone" ]]; then
-    tls_port="$EU_SERVER_PORT"
-  fi
   # 2.4 (Ubuntu 22.04): tune.h2.initial-window-size. 2.6+: fe/be.
   # haproxy обычно в /usr/sbin — его нет в PATH у dim; с set -e это роняло main.sh.
   local hap_bin=""
@@ -1533,10 +1535,7 @@ _wait_haproxy_port() {
 # (подписка при этом 200 — как на Helsinki). Backbone: ещё HAProxy на :EU_SERVER_PORT.
 # relay/edge: второй bind DOWNLOAD_LISTEN и extra= в подписке.
 assert_role_frontends() {
-  local tls_port=443
-  if [[ "$ROLE" == "edge" || "$ROLE" == "backbone" ]]; then
-    tls_port="$EU_SERVER_PORT"
-  fi
+  local tls_port="$CLIENT_PORT"
   if ! systemctl is-active --quiet xray; then
     sudo journalctl -u xray -n 40 --no-pager >&2 || true
     _die "xray не active — HAProxy :${tls_port} жив, прокси нет"
@@ -1556,9 +1555,9 @@ assert_role_frontends() {
     return 0
   fi
   local url n
-  url="$(https_url "$DOMAIN_NAME" "${SUBS_PATH}/update_subs_link")"
-  if sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q xray; then
-    _die "xray всё ещё на :${EU_SERVER_PORT} — старый Vision-inbound. Перезапустите ./main.sh"
+  url="$(https_url "$DOMAIN_NAME" "${SUBS_PATH}/update_subs_link" "$CLIENT_PORT")"
+  if sudo ss -lntp 2>/dev/null | grep -E ":${CLIENT_PORT}\\b" | grep -q xray; then
+    _die "xray всё ещё на :${CLIENT_PORT} — старый Vision-inbound. Перезапустите ./main.sh"
   fi
   for n in 1 2 3 4 5 6 7 8 9 10; do
     if sudo ss -lntp 2>/dev/null | grep -E ":${XRAY_XHTTP_PORT}\\b" | grep -q xray; then
@@ -1573,7 +1572,7 @@ assert_role_frontends() {
   fi
   local code tmp
   tmp="$(mktemp)"
-  code="$(curl -4sk --http1.1 --resolve "${DOMAIN_NAME}:${EU_SERVER_PORT}:127.0.0.1" -o "$tmp" -w '%{http_code}' --max-time 10 "$url" || true)"
+  code="$(curl -4sk --http1.1 --resolve "${DOMAIN_NAME}:${CLIENT_PORT}:127.0.0.1" -o "$tmp" -w '%{http_code}' --max-time 10 "$url" || true)"
   if [[ "$code" != "200" ]] || ! grep -q '^vless://' "$tmp" || ! grep -q 'type=xhttp' "$tmp"; then
     echo "HTTP ${code} с ${url} (через 127.0.0.1)" >&2
     head -c 400 "$tmp" >&2 || true

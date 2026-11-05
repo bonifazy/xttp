@@ -41,16 +41,13 @@ if [[ "$ROLE" == "relay" ]]; then
   echo "EU_SERVER_DOMAIN: $EU_SERVER_DOMAIN"
   echo "EU_SERVER_PORT: $EU_SERVER_PORT"
 fi
-if [[ "$ROLE" == "backbone" || "$ROLE" == "edge" ]]; then
+if [[ "$ROLE" == "backbone" ]]; then
   echo "EU_SERVER_PORT: $EU_SERVER_PORT"
 fi
 if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
+  echo "CLIENT_PORT: $CLIENT_PORT"
+  echo "DOWNLOAD_PORT: ${DOWNLOAD_LISTEN:-0}"
   echo "CLIENT_MODE: $CLIENT_MODE"
-  if [[ -n "${DOWNLOAD_LISTEN:-}" ]]; then
-    echo "DOWNLOAD: GET ${DOWNLOAD_HOST}:${DOWNLOAD_LISTEN} (extra.downloadSettings)"
-  else
-    echo "DOWNLOAD: выкл (DOWNLOAD_PORT=0)"
-  fi
 fi
 if [[ "$ROLE" == "relay" || "$ROLE" == "backbone" ]]; then
   echo "EU_XHTTP_MODE: $EU_XHTTP_MODE"
@@ -226,11 +223,7 @@ echo ""
 assert_role_frontends
 echo ""
 
-subs_port=443
-if [[ "$ROLE" == "edge" || "$ROLE" == "backbone" ]]; then
-  subs_port="$EU_SERVER_PORT"
-fi
-subs_url="$(https_url "$DOMAIN_NAME" "${SUBS_PATH}/update_subs_link" "$subs_port")"
+subs_url="$(https_url "$DOMAIN_NAME" "${SUBS_PATH}/update_subs_link" "$CLIENT_PORT")"
 echo "Файл подписки: $LINK_FILE"
 echo "Ссылка:"
 sudo cat "$LINK_FILE"

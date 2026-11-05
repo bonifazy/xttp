@@ -40,10 +40,7 @@ _sudo() {
 
 mkdir -p "${SCRIPT_DIR}/logs"
 
-tls_port=443
-if [[ "$ROLE" == "edge" ]]; then
-  tls_port="$EU_SERVER_PORT"
-fi
+tls_port="$CLIENT_PORT"
 
 now="$(date +%s)"
 now_iso="$(date -Iseconds)"
