@@ -67,7 +67,7 @@ XRAY_GROUP="${XRAY_GROUP:-nogroup}"
 
 ROLE="${ROLE:-edge}"
 DOMAIN_NAME="${DOMAIN_NAME:-}"
-# SUBS_PATH из .env игнорируем: main.sh генерирует, остальные скрипты берут из secrets.
+# SUBS_PATH из .env игнорируем: берём из secrets. main.sh генерирует, только если пусто.
 unset SUBS_PATH
 ALLOWED_IP="${ALLOWED_IP:-}"
 EU_SERVER_DOMAIN="${EU_SERVER_DOMAIN:-}"
@@ -154,7 +154,7 @@ HAPROXY_CERT="${HAPROXY_CERT:-/etc/haproxy/certs/${CERT_DOMAIN}.pem}"
 HOME_SSL_DIR="${HOME_SSL_DIR:-/home/${PROJECT_USER}/${CERT_DOMAIN}}"
 
 if [[ "$ROLE" == "relay" && -z "$EU_SERVER_LINK" ]]; then
-  _die "ROLE=relay требует EU_SERVER_LINK в .env (SUBS_PATH на backbone каждый main.sh новый)"
+  _die "ROLE=relay требует EU_SERVER_LINK в .env (путь подписки backbone в secrets, не каждый main.sh новый)"
 fi
 
 if [[ ! "$EU_SERVER_PORT" =~ ^[0-9]+$ ]] || [[ "$EU_SERVER_PORT" -lt 1 || "$EU_SERVER_PORT" -gt 65535 ]]; then

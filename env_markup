@@ -13,7 +13,7 @@ ROLE="edge"
 # и /etc/ssl/newip.dev. Другой апекс: CERT_DOMAIN="example.com"
 DOMAIN_NAME="REGION.nerabotaet.com"
 
-# SUBS_PATH не задаём: main.sh каждый запуск делает случайный путь 12–32 символа.
+# SUBS_PATH не задаём: один раз пишет secrets, дальше main.sh его не меняет.
 
 # Почта Let's Encrypt (если нет /tmp/fullchain.crt + cert.key).
 ACME_EMAIL="you@example.com"

@@ -6,8 +6,7 @@
 #      Let's Encrypt на DOMAIN_NAME (ACME_EMAIL в .env, автообновление)
 #   3. DNS DOMAIN_NAME смотрит на этот VPS
 #   4. ROLE=relay: EU_SERVER_LINK = постоянная vless-ссылка backbone
-#      (XHTTP packet-up). Подписку backbone не качаем: SUBS_PATH каждый
-#      main.sh новый.
+#      (XHTTP packet-up). SUBS_PATH из secrets; новый только если пусто.
 #
 # Идемпотентно: .xttp_secrets не перезаписывает. Конфиги собирает заново.
 # ROLE=relay/edge: клиентская ссылка — XHTTP stream-up + alpn=h2 + extra.downloadSettings (GET на второй порт).
@@ -19,7 +18,12 @@ set -euo pipefail
 # shellcheck disable=SC1091
 source /home/dim/xttp/common.sh
 
-SUBS_PATH="$(generate_subs_path)"
+if [[ -z "${SUBS_PATH:-}" ]]; then
+  SUBS_PATH="$(generate_subs_path)"
+  echo "SUBS_PATH: $SUBS_PATH (новый)"
+else
+  echo "SUBS_PATH: $SUBS_PATH (из secrets)"
+fi
 LINK_FILE="/var/www/html/${SUBS_PATH}/update_subs_link"
 
 echo ""
@@ -28,7 +32,6 @@ echo "DOMAIN_NAME: $DOMAIN_NAME"
 echo "CERT_DOMAIN: $CERT_DOMAIN"
 echo "HOME_SSL_DIR: $HOME_SSL_DIR"
 echo "SSL_DIR: $SSL_DIR"
-echo "SUBS_PATH: $SUBS_PATH (новый при этом запуске)"
 if [[ -n "$ALLOWED_IP" ]]; then
   echo "ALLOWED_IP: $ALLOWED_IP"
 else
@@ -147,6 +150,12 @@ write_haproxy_config
 echo "Пишу Xray config"
 write_xray_config "$UUID" "${XHTTP_PATH:-}" "${EU_UUID:-}"
 
+chmod +x "${SCRIPT_DIR}/"*.sh
+publish_link
+echo ""
+
+# SIGHUP от оборванного SSH (туннель через этот же xray) не должен резать main.sh.
+trap '' HUP
 echo "Тест Nginx"
 sudo nginx -t
 sudo systemctl restart nginx
@@ -154,16 +163,21 @@ sleep 1
 sudo systemctl status nginx --no-pager
 echo ""
 
-# Xray раньше HAProxy: на старом backbone :CLIENT_PORT держал Xray (Vision).
+echo "Тест HAProxy"
+sudo haproxy -c -f "$HAPROXY_CFG"
+sudo systemctl unmask haproxy
+sudo systemctl enable haproxy
+sudo systemctl restart haproxy
+sleep 1
+sudo systemctl status haproxy --no-pager
+echo ""
+
+# Xray последним: restart рвёт клиентские сессии и SSH, если он идёт через этот узел.
 echo "systemctl enable --now / restart xray"
 sudo systemctl daemon-reload
 sudo systemctl enable xray
 restart_xray
 sudo systemctl status xray --no-pager
-echo ""
-
-chmod +x "${SCRIPT_DIR}/"*.sh
-publish_link
 echo ""
 
 add_cron() {
@@ -209,14 +223,6 @@ else
   echo "Cron: change_uuid_and_path.sh снят (ROLE=${ROLE}, hop не ротируем)"
 fi
 
-echo "Тест HAProxy"
-sudo haproxy -c -f "$HAPROXY_CFG"
-sudo systemctl unmask haproxy
-sudo systemctl enable haproxy
-sudo systemctl restart haproxy
-sleep 1
-sudo systemctl status haproxy --no-pager
-echo ""
 assert_role_frontends
 echo ""
 
