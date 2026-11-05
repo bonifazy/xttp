@@ -43,6 +43,10 @@ ADGUARD_CACHE_TTL_MAX="${ADGUARD_CACHE_TTL_MAX:-0}"
 # Порт магистрали: из .env, иначе 443.
 # С RU ALPN на :443 часто режут — для пары relay↔backbone ставят 8443.
 EU_SERVER_PORT="${EU_SERVER_PORT:-443}"
+# Клиентский GET (downloadSettings). 0 — выкл. Пусто — 8443, если аплинк уже 8443 — 443.
+DOWNLOAD_PORT="${DOWNLOAD_PORT:-}"
+DOWNLOAD_HOST="${DOWNLOAD_HOST:-}"
+DOWNLOAD_LISTEN=""
 # Inbound XHTTP на всех ролях принимает любой режим клиента.
 XHTTP_MODE="auto"
 # Hop relay→backbone: packet-up (короткие POST). Не Vision: он только с TCP/stream-one.
@@ -153,6 +157,31 @@ fi
 
 if [[ ! "$EU_SERVER_PORT" =~ ^[0-9]+$ ]] || [[ "$EU_SERVER_PORT" -lt 1 || "$EU_SERVER_PORT" -gt 65535 ]]; then
   _die "EU_SERVER_PORT должен быть 1-65535. Сейчас: '${EU_SERVER_PORT}'"
+fi
+
+# relay/edge: второй вход в тот же HAProxy. Телефон POST→основной, GET→DOWNLOAD_LISTEN.
+DOWNLOAD_HOST="${DOWNLOAD_HOST:-$DOMAIN_NAME}"
+if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
+  _up_port=443
+  [[ "$ROLE" == "edge" ]] && _up_port="$EU_SERVER_PORT"
+  if [[ "${DOWNLOAD_PORT}" == "0" ]]; then
+    DOWNLOAD_LISTEN=""
+  elif [[ -n "${DOWNLOAD_PORT}" ]]; then
+    DOWNLOAD_LISTEN="$DOWNLOAD_PORT"
+  elif [[ "$_up_port" == "8443" ]]; then
+    DOWNLOAD_LISTEN="443"
+  else
+    DOWNLOAD_LISTEN="8443"
+  fi
+  if [[ -n "$DOWNLOAD_LISTEN" ]]; then
+    if [[ ! "$DOWNLOAD_LISTEN" =~ ^[0-9]+$ ]] || [[ "$DOWNLOAD_LISTEN" -lt 1 || "$DOWNLOAD_LISTEN" -gt 65535 ]]; then
+      _die "DOWNLOAD_PORT должен быть 1-65535 или 0. Сейчас: '${DOWNLOAD_LISTEN}'"
+    fi
+    if [[ "$DOWNLOAD_LISTEN" == "$_up_port" ]]; then
+      _die "DOWNLOAD_PORT=${DOWNLOAD_LISTEN} совпадает с клиентским :${_up_port}. Другой порт или 0."
+    fi
+  fi
+  unset _up_port
 fi
 
 if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
@@ -302,7 +331,8 @@ https_url() {
 }
 
 # Собирает ссылку подписки. Хост — DOMAIN_NAME этого сервера.
-# relay/edge: XHTTP + CLIENT_MODE (телефон). backbone: XHTTP + EU_XHTTP_MODE (hop relay).
+# relay/edge: XHTTP + CLIENT_MODE (телефон) + extra.downloadSettings на второй порт.
+# backbone: XHTTP + EU_XHTTP_MODE (hop relay), без extra — hop один XHTTP.
 build_vless_link() {
   local uuid="${1:-$UUID}"
   if [[ -z "$uuid" ]]; then
@@ -315,22 +345,42 @@ build_vless_link() {
   fi
   local client_port=443
   local mode="$CLIENT_MODE"
+  local dl_host="${DOWNLOAD_HOST:-$DOMAIN_NAME}"
+  local dl_port=""
   if [[ "$ROLE" == "edge" || "$ROLE" == "backbone" ]]; then
     client_port="$EU_SERVER_PORT"
   fi
   if [[ "$ROLE" == "backbone" ]]; then
     mode="${EU_XHTTP_MODE:-packet-up}"
   fi
-  "$PYTHON" - "$uuid" "$DOMAIN_NAME" "$XHTTP_PATH" "$mode" "$client_port" <<'PY'
+  if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
+    dl_port="${DOWNLOAD_LISTEN:-}"
+  fi
+  "$PYTHON" - "$uuid" "$DOMAIN_NAME" "$XHTTP_PATH" "$mode" "$client_port" "$dl_host" "$dl_port" <<'PY'
+import json
 import sys
 from urllib.parse import quote
-uuid, host, path, mode, port = sys.argv[1:]
+uuid, host, path, mode, port, dl_host, dl_port = sys.argv[1:]
 enc_path = quote(path, safe="")
-print(
+link = (
     f"vless://{uuid}@{host}:{port}?encryption=none&security=tls"
     f"&sni={host}&fp=chrome&alpn=h2&type=xhttp"
     f"&path={enc_path}&mode={mode}"
 )
+if dl_port:
+    xh_path = path if path.startswith("/") else "/" + path
+    extra = {
+        "downloadSettings": {
+            "address": dl_host,
+            "port": int(dl_port),
+            "network": "xhttp",
+            "security": "tls",
+            "tlsSettings": {"serverName": host, "fingerprint": "chrome", "alpn": ["h2"]},
+            "xhttpSettings": {"path": xh_path, "mode": "auto"},
+        }
+    }
+    link += "&extra=" + quote(json.dumps(extra, separators=(",", ":")), safe="")
+print(link)
 PY
 }
 
@@ -460,6 +510,9 @@ apply_ufw() {
   elif [[ "$ROLE" == "backbone" ]]; then
     sudo ufw allow 80/tcp comment "HTTP redirect"
     sudo ufw allow "${EU_SERVER_PORT}/tcp" comment "HTTPS backbone"
+  fi
+  if [[ -n "${DOWNLOAD_LISTEN:-}" ]]; then
+    sudo ufw allow "${DOWNLOAD_LISTEN}/tcp" comment "HTTPS download"
   fi
   if [[ -n "$ALLOWED_IP" && "$ALLOWED_IP" != "*" ]]; then
     while read -r ip; do
@@ -764,10 +817,11 @@ write_haproxy_config() {
   fi
   "$PYTHON" - "/tmp/haproxy.cfg" "$DOMAIN_NAME" "$SUBS_PATH" "$XHTTP_PATH" \
     "$ALLOWED_IP" "$HAPROXY_CERT" "$XRAY_XHTTP_LISTEN" "$XRAY_XHTTP_PORT" \
-    "$NGINX_FALLBACK" "$DECOY_ADDR" "$tls_port" "$h2_fe_be" <<'PY'
+    "$NGINX_FALLBACK" "$DECOY_ADDR" "$tls_port" "$h2_fe_be" "${DOWNLOAD_LISTEN:-}" <<'PY'
 import sys
-dst, domain, subs, xhttp, allowed, cert, xlisten, xport, nginx, decoy, tls_port, h2_fe_be = sys.argv[1:]
+dst, domain, subs, xhttp, allowed, cert, xlisten, xport, nginx, decoy, tls_port, h2_fe_be, download_port = sys.argv[1:]
 tls_port = int(tls_port)
+download_port = int(download_port) if download_port and download_port != "0" else 0
 if h2_fe_be == "1":
     h2_window = (
         "    tune.h2.fe.initial-window-size 1048576\n"
@@ -785,6 +839,8 @@ if ips:
     acl_ok = "    acl subs_ok src 127.0.0.1 " + " ".join(ips) + "\n"
     use_subs = "use_backend be_subs if is_subs subs_ok"
 bind_ssl = f"    bind :{tls_port} ssl crt {cert} alpn h2,http/1.1"
+if download_port and download_port != tls_port:
+    bind_ssl += f"\n    bind :{download_port} ssl crt {cert} alpn h2,http/1.1"
 if tls_port == 443:
     redir = "    http-request redirect scheme https code 301 unless { ssl_fc || is_acme }"
 else:
@@ -1451,34 +1507,48 @@ restart_xray() {
   fi
 }
 
-# Xray должен быть active на любой роли. Иначе HAProxy отдаёт 502 на XHTTP path
-# (подписка при этом 200 — как на Helsinki). Backbone: ещё HAProxy на :EU_SERVER_PORT.
-assert_role_frontends() {
-  if ! systemctl is-active --quiet xray; then
-    sudo journalctl -u xray -n 40 --no-pager >&2 || true
-    _die "xray не active — HAProxy :443 жив, прокси нет"
-  fi
-  if [[ "$ROLE" != "backbone" ]]; then
-    return 0
-  fi
-  local url
-  url="$(https_url "$DOMAIN_NAME" "${SUBS_PATH}/update_subs_link")"
-  if ! systemctl is-active --quiet haproxy; then
-    sudo journalctl -u haproxy -n 40 --no-pager >&2 || true
-    _die "haproxy не active — :${EU_SERVER_PORT} должен держать HAProxy, не Xray"
-  fi
-  local n
+# Ждём, пока HAProxy откроет порт. 10×1 с, потом _die.
+_wait_haproxy_port() {
+  local port="$1" n
   for n in 1 2 3 4 5 6 7 8 9 10; do
-    if sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q haproxy; then
-      break
+    if sudo ss -lntp 2>/dev/null | grep -E ":${port}\\b" | grep -q haproxy; then
+      return 0
     fi
-    echo "ждём, пока HAProxy откроет :${EU_SERVER_PORT} (${n}/10)..."
+    echo "ждём, пока HAProxy откроет :${port} (${n}/10)..."
     sleep 1
   done
-  if ! sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q haproxy; then
-    sudo journalctl -u haproxy -n 40 --no-pager >&2 || true
-    _die "HAProxy не слушает :${EU_SERVER_PORT}"
+  sudo journalctl -u haproxy -n 40 --no-pager >&2 || true
+  _die "HAProxy не слушает :${port}"
+}
+
+# Xray должен быть active на любой роли. Иначе HAProxy отдаёт 502 на XHTTP path
+# (подписка при этом 200 — как на Helsinki). Backbone: ещё HAProxy на :EU_SERVER_PORT.
+# relay/edge: второй bind DOWNLOAD_LISTEN и extra= в подписке.
+assert_role_frontends() {
+  local tls_port=443
+  if [[ "$ROLE" == "edge" || "$ROLE" == "backbone" ]]; then
+    tls_port="$EU_SERVER_PORT"
   fi
+  if ! systemctl is-active --quiet xray; then
+    sudo journalctl -u xray -n 40 --no-pager >&2 || true
+    _die "xray не active — HAProxy :${tls_port} жив, прокси нет"
+  fi
+  if ! systemctl is-active --quiet haproxy; then
+    sudo journalctl -u haproxy -n 40 --no-pager >&2 || true
+    _die "haproxy не active — :${tls_port} должен держать HAProxy, не Xray"
+  fi
+  _wait_haproxy_port "$tls_port"
+  if [[ -n "${DOWNLOAD_LISTEN:-}" ]]; then
+    _wait_haproxy_port "$DOWNLOAD_LISTEN"
+  fi
+  if [[ "$ROLE" != "backbone" ]]; then
+    if [[ -n "${DOWNLOAD_LISTEN:-}" ]] && ! sudo grep -q 'extra=' "$LINK_FILE" 2>/dev/null; then
+      _die "подписка без extra=downloadSettings — build_vless_link"
+    fi
+    return 0
+  fi
+  local url n
+  url="$(https_url "$DOMAIN_NAME" "${SUBS_PATH}/update_subs_link")"
   if sudo ss -lntp 2>/dev/null | grep -E ":${EU_SERVER_PORT}\\b" | grep -q xray; then
     _die "xray всё ещё на :${EU_SERVER_PORT} — старый Vision-inbound. Перезапустите ./main.sh"
   fi

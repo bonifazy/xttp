@@ -49,13 +49,18 @@ now="$(date +%s)"
 now_iso="$(date -Iseconds)"
 
 echo "===== tspu_watch ${now_iso} ====="
-echo "ROLE=${ROLE} DOMAIN=${DOMAIN_NAME} TLS_PORT=${tls_port}"
+echo "ROLE=${ROLE} DOMAIN=${DOMAIN_NAME} TLS_PORT=${tls_port} DOWNLOAD_PORT=${DOWNLOAD_LISTEN:-off}"
 
 echo "--- listeners ---"
 ss_out="$(_sudo ss -lntp 2>/dev/null || ss -lnt)"
-printf '%s\n' "$ss_out" | grep -E ":${tls_port}\\b|:80\\b|:10085\\b|:8888\\b|:8081\\b" || true
+_ports=":${tls_port}\\b|:80\\b|:10085\\b|:8888\\b|:8081\\b"
+[[ -n "${DOWNLOAD_LISTEN:-}" ]] && _ports="${_ports}|:${DOWNLOAD_LISTEN}\\b"
+printf '%s\n' "$ss_out" | grep -E "$_ports" || true
 if printf '%s\n' "$ss_out" | grep -E ":${tls_port}\\b" | grep -q xray; then
   echo "ALERT: xray слушает публичный :${tls_port} — должен быть только HAProxy"
+fi
+if [[ -n "${DOWNLOAD_LISTEN:-}" ]] && printf '%s\n' "$ss_out" | grep -E ":${DOWNLOAD_LISTEN}\\b" | grep -q xray; then
+  echo "ALERT: xray слушает публичный :${DOWNLOAD_LISTEN} — должен быть только HAProxy"
 fi
 if printf '%s\n' "$ss_out" | grep -E ":10085\\b" | grep -qE '0\\.0\\.0\\.0:10085|\\*:10085'; then
   echo "ALERT: xray :10085 не только 127.0.0.1"

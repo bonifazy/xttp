@@ -28,6 +28,12 @@ EU_SERVER_DOMAIN="EUR_REGION.nerabotaet.com"
 # Порт туннеля, иначе 443. С RU на :443 часто режут — тогда 8443.
 EU_SERVER_PORT=8443
 
+# Телефон (relay/edge): POST на основной порт, GET на второй — тот же HAProxy и inbound.
+# extra.downloadSettings в подписке. Happ/v2rayNG читают extra. Backbone/hop — один XHTTP, не ставить.
+# Пусто — 8443; если основной уже 8443 — тогда 443. 0 — выключить. Другой хост: DOWNLOAD_HOST.
+# DOWNLOAD_PORT=8443
+# DOWNLOAD_HOST=""
+
 # Hop relay→backbone. По умолчанию packet-up.
 # EU_XHTTP_MODE="packet-up"
 
