@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Общая библиотека xttp. Её source-ят main.sh, change_uuid_and_path.sh,
-# from_ru_relay_update_eu_uuid.sh, update_geodata.sh, tspu_watch.sh.
+# from_ru_relay_update_eu_uuid.sh, update_geodata.sh, tspu_watch.sh, status.sh.
 # Проект всегда в /home/dim/xttp.
 
 SCRIPT_DIR="/home/dim/xttp"
@@ -832,7 +832,8 @@ if h2_fe_be == "1":
     )
 else:
     h2_window = "    tune.h2.initial-window-size 1048576"
-subs_path = f"/{subs.strip('/')}/update_subs_link"
+subs_dir = "/" + subs.strip("/") + "/"
+subs_path = f"{subs_dir}update_subs_link"
 if not xhttp.startswith("/"):
     xhttp = "/" + xhttp
 ips = [] if allowed in ("", "*") else allowed.split()
@@ -891,7 +892,7 @@ frontend fe_tls
 
     acl is_acme  path_beg /.well-known/acme-challenge/
     acl is_xhttp path_beg {xhttp}
-    acl is_subs  path {subs_path}
+    acl is_subs  path_beg {subs_dir}
 {acl_ok}    http-request set-log-level silent if is_xhttp
 
     use_backend be_subs if is_acme
