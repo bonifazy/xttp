@@ -859,8 +859,10 @@ if ips:
     use_subs = "use_backend be_subs if is_subs subs_ok"
 bind_ssl = f"    bind :{tls_port} ssl crt {cert} alpn h2,http/1.1"
 bind_h3 = ""
+quic_compat = ""
 if h3_download == "1":
     bind_h3 = f"\n    bind quic4@0.0.0.0:{tls_port} ssl crt {cert} alpn h3"
+    quic_compat = "    limited-quic\n"
 if download_port and download_port != tls_port:
     bind_ssl += f"\n    bind :{download_port} ssl crt {cert} alpn h2,http/1.1"
 if tls_port == 443:
@@ -873,7 +875,7 @@ else:
 cfg = f"""global
     log /dev/log local0 info
     log /dev/log local1 notice
-    chroot /var/lib/haproxy
+{quic_compat}    chroot /var/lib/haproxy
     stats socket /run/haproxy/admin.sock mode 660 group haproxy level admin
     stats timeout 30s
     user haproxy
