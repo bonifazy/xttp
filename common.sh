@@ -43,7 +43,7 @@ ADGUARD_CACHE_TTL_MAX="${ADGUARD_CACHE_TTL_MAX:-0}"
 # Порт магистрали hop: из .env, иначе 443.
 # С RU ALPN на :443 часто режут — для пары relay↔backbone ставят 8443.
 EU_SERVER_PORT="${EU_SERVER_PORT:-443}"
-# Публичный TLS (все роли). Иначе 443. Relay/edge: POST телефона.
+# Порт клиента/CDN домена. При CDN_ENABLED TLS заканчивается на CDN.
 CLIENT_PORT="${CLIENT_PORT:-443}"
 # Клиентский GET (downloadSettings). 0 — выкл. Пусто — 8443, если POST уже 8443 — 443.
 DOWNLOAD_PORT="${DOWNLOAD_PORT:-}"
@@ -73,6 +73,12 @@ ALLOWED_IP="${ALLOWED_IP:-}"
 EU_SERVER_DOMAIN="${EU_SERVER_DOMAIN:-}"
 EU_SERVER_LINK="${EU_SERVER_LINK:-}"
 CLIENT_MODE="${CLIENT_MODE:-stream-up}"
+CDN_ENABLED="${CDN_ENABLED:-0}"
+CDN_ORIGIN_PORT="${CDN_ORIGIN_PORT:-18081}"
+CDN_UPLINK_HTTP_METHOD="${CDN_UPLINK_HTTP_METHOD:-GET}"
+CDN_UPLINK_DATA_PLACEMENT="${CDN_UPLINK_DATA_PLACEMENT:-cookie}"
+CDN_UPLINK_CHUNK_SIZE="${CDN_UPLINK_CHUNK_SIZE:-512}"
+CDN_PREFIX_URL="${CDN_PREFIX_URL:-https://tech.cdn.yandex.net/prefixes/yc.json}"
 ACME_EMAIL="${ACME_EMAIL:-}"
 XHTTP_H3_DOWNLOAD="${XHTTP_H3_DOWNLOAD:-0}"
 EU_SNI="${EU_SERVER_DOMAIN}"
@@ -132,6 +138,25 @@ case "$ROLE" in
   relay|edge|backbone) ;;
   *) _die "ROLE должен быть relay, edge или backbone. Сейчас: '${ROLE}'" ;;
 esac
+
+case "$CDN_ENABLED" in
+  0|1) ;;
+  *) _die "CDN_ENABLED должен быть 0 или 1. Сейчас: '${CDN_ENABLED}'" ;;
+esac
+if [[ "$CDN_ENABLED" == "1" ]]; then
+  [[ "$ROLE" == "edge" || "$ROLE" == "relay" ]] || _die "CDN_ENABLED=1 поддерживается только для ROLE=edge или relay"
+  [[ "$CLIENT_PORT" == "443" ]] || _die "CDN_ENABLED=1 требует CLIENT_PORT=443 (публичный порт CDN)"
+  [[ "$DOWNLOAD_PORT" == "0" ]] || _die "CDN_ENABLED=1 требует DOWNLOAD_PORT=0: оба направления идут через один CDN endpoint"
+  [[ "$XHTTP_H3_DOWNLOAD" == "0" ]] || _die "CDN_ENABLED=1 несовместим с XHTTP_H3_DOWNLOAD"
+  [[ "$CDN_UPLINK_HTTP_METHOD" == "GET" ]] || _die "CDN_UPLINK_HTTP_METHOD сейчас поддерживает только GET"
+  [[ "$CDN_UPLINK_DATA_PLACEMENT" == "cookie" || "$CDN_UPLINK_DATA_PLACEMENT" == "header" ]] \
+    || _die "CDN_UPLINK_DATA_PLACEMENT должен быть cookie или header"
+  [[ "$CDN_ORIGIN_PORT" =~ ^[0-9]+$ ]] && [[ "$CDN_ORIGIN_PORT" -ge 1 && "$CDN_ORIGIN_PORT" -le 65535 ]] \
+    || _die "CDN_ORIGIN_PORT должен быть 1-65535"
+  [[ "$CDN_UPLINK_CHUNK_SIZE" =~ ^[0-9]+$ ]] && [[ "$CDN_UPLINK_CHUNK_SIZE" -ge 64 && "$CDN_UPLINK_CHUNK_SIZE" -le 2048 ]] \
+    || _die "CDN_UPLINK_CHUNK_SIZE должен быть 64-2048 байт"
+  CLIENT_MODE="packet-up"
+fi
 case "$XHTTP_H3_DOWNLOAD" in
   0|1) ;;
   *) _die "XHTTP_H3_DOWNLOAD должен быть 0 или 1. Сейчас: '${XHTTP_H3_DOWNLOAD}'" ;;
@@ -369,29 +394,38 @@ build_vless_link() {
   local dl_port=""
   if [[ "$ROLE" == "backbone" ]]; then
     mode="${EU_XHTTP_MODE:-packet-up}"
+  elif [[ "$CDN_ENABLED" == "1" ]]; then
+    mode="packet-up"
   fi
-  if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
+  if [[ "$CDN_ENABLED" != "1" && ( "$ROLE" == "relay" || "$ROLE" == "edge" ) ]]; then
     dl_port="${DOWNLOAD_LISTEN:-}"
     if [[ "$XHTTP_H3_DOWNLOAD" == "1" ]]; then
       dl_port="$client_port"
     fi
   fi
-  "$PYTHON" - "$uuid" "$DOMAIN_NAME" "$XHTTP_PATH" "$mode" "$client_port" "$dl_host" "$dl_port" "$XHTTP_H3_DOWNLOAD" <<'PY'
+  "$PYTHON" - "$uuid" "$DOMAIN_NAME" "$XHTTP_PATH" "$mode" "$client_port" "$dl_host" "$dl_port" "$XHTTP_H3_DOWNLOAD" \
+    "$CDN_ENABLED" "$CDN_UPLINK_HTTP_METHOD" "$CDN_UPLINK_DATA_PLACEMENT" "$CDN_UPLINK_CHUNK_SIZE" <<'PY'
 import json
 import sys
 from urllib.parse import quote
-uuid, host, path, mode, port, dl_host, dl_port, h3_download = sys.argv[1:]
+uuid, host, path, mode, port, dl_host, dl_port, h3_download, cdn_enabled, uplink_method, data_placement, chunk_size = sys.argv[1:]
 enc_path = quote(path, safe="")
 link = (
     f"vless://{uuid}@{host}:{port}?encryption=none&security=tls"
     f"&sni={host}&fp=chrome&alpn=h2&type=xhttp"
     f"&path={enc_path}&mode={mode}"
 )
+extra = {}
+if cdn_enabled == "1":
+    extra.update({
+        "uplinkHTTPMethod": uplink_method,
+        "uplinkDataPlacement": data_placement,
+        "uplinkChunkSize": int(chunk_size),
+    })
 if dl_port:
     xh_path = path if path.startswith("/") else "/" + path
     download_alpn = ["h3"] if h3_download == "1" else ["h2"]
-    extra = {
-        "downloadSettings": {
+    extra["downloadSettings"] = {
             "address": dl_host,
             "port": int(dl_port),
             "network": "xhttp",
@@ -399,7 +433,7 @@ if dl_port:
             "tlsSettings": {"serverName": host, "fingerprint": "chrome", "alpn": download_alpn},
             "xhttpSettings": {"path": xh_path, "mode": "auto"},
         }
-    }
+if extra:
     link += "&extra=" + quote(json.dumps(extra, separators=(",", ":")), safe="")
 print(link)
 PY
@@ -522,19 +556,29 @@ fetch_eu_link() {
 
 apply_ufw() {
   local ip
-  sudo ufw allow 80/tcp comment "HTTP redirect"
-  if [[ "$ROLE" == "backbone" ]]; then
-    sudo ufw allow "${CLIENT_PORT}/tcp" comment "HTTPS backbone"
+  if [[ "$CDN_ENABLED" == "1" ]]; then
+    echo "UFW: разрешаю origin :${CDN_ORIGIN_PORT}/tcp только подсетям Yandex CDN"
+    curl -4fsSL --connect-timeout 10 --max-time 30 "$CDN_PREFIX_URL" \
+      | "$PYTHON" -c 'import json,sys; print(*json.load(sys.stdin)["prefixes"], sep="\n")' \
+      | while IFS= read -r ip; do
+          [[ -z "$ip" ]] && continue
+          sudo ufw allow from "$ip" to any port "$CDN_ORIGIN_PORT" proto tcp comment "Yandex CDN origin"
+        done
   else
-    sudo ufw allow "${CLIENT_PORT}/tcp" comment "HTTPS"
+    sudo ufw allow 80/tcp comment "HTTP redirect"
+    if [[ "$ROLE" == "backbone" ]]; then
+      sudo ufw allow "${CLIENT_PORT}/tcp" comment "HTTPS backbone"
+    else
+      sudo ufw allow "${CLIENT_PORT}/tcp" comment "HTTPS"
+    fi
+    if [[ "$XHTTP_H3_DOWNLOAD" == "1" ]]; then
+      sudo ufw allow "${CLIENT_PORT}/udp" comment "XHTTP HTTP/3 download"
+    fi
+    if [[ -n "${DOWNLOAD_LISTEN:-}" ]]; then
+      sudo ufw allow "${DOWNLOAD_LISTEN}/tcp" comment "HTTPS download"
+    fi
   fi
-  if [[ "$XHTTP_H3_DOWNLOAD" == "1" ]]; then
-    sudo ufw allow "${CLIENT_PORT}/udp" comment "XHTTP HTTP/3 download"
-  fi
-  if [[ -n "${DOWNLOAD_LISTEN:-}" ]]; then
-    sudo ufw allow "${DOWNLOAD_LISTEN}/tcp" comment "HTTPS download"
-  fi
-  if [[ -n "$ALLOWED_IP" && "$ALLOWED_IP" != "*" ]]; then
+  if [[ "$CDN_ENABLED" != "1" && -n "$ALLOWED_IP" && "$ALLOWED_IP" != "*" ]]; then
     while read -r ip; do
       [[ -z "$ip" ]] && continue
       sudo ufw allow from "$ip" comment "All from allowed_ip"
@@ -658,7 +702,8 @@ write_xray_config() {
     "$XHTTP_MODE" "$XRAY_XHTTP_LISTEN" "$XRAY_XHTTP_PORT" \
     "${EU_XHTTP_PATH:-}" "${EU_XHTTP_MODE:-packet-up}" "${CERT_DOMAIN:-}" \
     "${ADGUARD_DNS_ADDR}" "${ADGUARD_DNS_PORT}" \
-    "${ADGUARD_VIA_EU_PORT}" "${ADGUARD_VIA_EU_DEST}" <<'PY'
+    "${ADGUARD_VIA_EU_PORT}" "${ADGUARD_VIA_EU_DEST}" \
+    "$CDN_ENABLED" "$CDN_UPLINK_HTTP_METHOD" "$CDN_UPLINK_DATA_PLACEMENT" "$CDN_UPLINK_CHUNK_SIZE" <<'PY'
 import json, sys
 
 (
@@ -666,6 +711,7 @@ import json, sys
     eu_port, eu_sni, xhttp_mode, xlisten, xport,
     eu_xhttp_path, eu_xhttp_mode, cert_domain,
     ag_addr, ag_port, via_eu_port, via_eu_dest,
+    cdn_enabled, cdn_uplink_method, cdn_data_placement, cdn_chunk_size,
 ) = sys.argv[1:]
 xport = int(xport)
 eu_port = int(eu_port) if eu_port else 443
@@ -673,10 +719,17 @@ ag_port = int(ag_port)
 via_eu_port = int(via_eu_port)
 
 
-def xhttp_settings(path, mode):
+def xhttp_settings(path, mode, cdn=False):
     if path and not path.startswith("/"):
         path = "/" + path
-    return {"path": path, "mode": mode}
+    settings = {"path": path, "mode": mode}
+    if cdn:
+        settings.update({
+            "uplinkHTTPMethod": cdn_uplink_method,
+            "uplinkDataPlacement": cdn_data_placement,
+            "uplinkChunkSize": int(cdn_chunk_size),
+        })
+    return settings
 
 
 log = {"loglevel": "warning", "access": "none"}
@@ -707,7 +760,11 @@ inbound = {
     "streamSettings": {
         "network": "xhttp",
         "security": "none",
-        "xhttpSettings": xhttp_settings(xhttp_path, xhttp_mode),
+        "xhttpSettings": xhttp_settings(
+            xhttp_path,
+            "packet-up" if cdn_enabled == "1" else xhttp_mode,
+            cdn=cdn_enabled == "1",
+        ),
     },
     "sniffing": sniff,
 }
@@ -812,6 +869,7 @@ write_haproxy_config() {
     return 1
   fi
   local tls_port="$CLIENT_PORT"
+  local cdn_port="$CDN_ORIGIN_PORT"
   local h2_fe_be=0
   local hap_ver hap_maj hap_min
   # 2.4 (Ubuntu 22.04): tune.h2.initial-window-size. 2.6+: fe/be.
@@ -835,10 +893,11 @@ write_haproxy_config() {
   "$PYTHON" - "/tmp/haproxy.cfg" "$DOMAIN_NAME" "$SUBS_PATH" "$XHTTP_PATH" \
     "$ALLOWED_IP" "$HAPROXY_CERT" "$XRAY_XHTTP_LISTEN" "$XRAY_XHTTP_PORT" \
     "$NGINX_FALLBACK" "$DECOY_ADDR" "$tls_port" "$h2_fe_be" "${DOWNLOAD_LISTEN:-}" \
-    "$XHTTP_H3_DOWNLOAD" <<'PY'
+    "$XHTTP_H3_DOWNLOAD" "$CDN_ENABLED" "$cdn_port" <<'PY'
 import sys
-dst, domain, subs, xhttp, allowed, cert, xlisten, xport, nginx, decoy, tls_port, h2_fe_be, download_port, h3_download = sys.argv[1:]
+dst, domain, subs, xhttp, allowed, cert, xlisten, xport, nginx, decoy, tls_port, h2_fe_be, download_port, h3_download, cdn_enabled, cdn_port = sys.argv[1:]
 tls_port = int(tls_port)
+cdn_port = int(cdn_port)
 download_port = int(download_port) if download_port and download_port != "0" else 0
 if h2_fe_be == "1":
     h2_window = (
@@ -857,15 +916,19 @@ use_subs = "use_backend be_subs if is_subs"
 if ips:
     acl_ok = "    acl subs_ok src 127.0.0.1 " + " ".join(ips) + "\n"
     use_subs = "use_backend be_subs if is_subs subs_ok"
-bind_ssl = f"    bind :{tls_port} ssl crt {cert} alpn h2,http/1.1"
+bind_http = "" if cdn_enabled == "1" else "    bind :80"
+bind_ssl = "" if cdn_enabled == "1" else f"    bind :{tls_port} ssl crt {cert} alpn h2,http/1.1"
+bind_cdn = f"\n    bind :{cdn_port}" if cdn_enabled == "1" else ""
 bind_h3 = ""
 quic_compat = ""
 if h3_download == "1":
     bind_h3 = f"\n    bind quic4@0.0.0.0:{tls_port} ssl crt {cert} alpn h3"
     quic_compat = "    limited-quic\n"
-if download_port and download_port != tls_port:
+if cdn_enabled != "1" and download_port and download_port != tls_port:
     bind_ssl += f"\n    bind :{download_port} ssl crt {cert} alpn h2,http/1.1"
-if tls_port == 443:
+if cdn_enabled == "1":
+    redir = ""
+elif tls_port == 443:
     redir = "    http-request redirect scheme https code 301 unless { ssl_fc || is_acme }"
 else:
     redir = (
@@ -905,15 +968,16 @@ defaults
     timeout http-keep-alive 10s
 
 frontend fe_tls
-    bind :80
-{bind_ssl}{bind_h3}
+{bind_http}
+{bind_ssl}{bind_h3}{bind_cdn}
 {redir}
-    http-response set-header Strict-Transport-Security "max-age=31536000"
 
+    acl is_cdn_origin dst_port {cdn_port}
     acl is_acme  path_beg /.well-known/acme-challenge/
     acl is_xhttp path_beg {xhttp}
     acl is_subs  path_beg {subs_dir}
 {acl_ok}    http-request set-log-level silent if is_xhttp
+    http-response set-header Strict-Transport-Security "max-age=31536000" unless is_cdn_origin
 
     use_backend be_subs if is_acme
     use_backend be_xray if is_xhttp

@@ -8,6 +8,17 @@
 
 ROLE="edge"
 
+# Yandex Cloud CDN: клиент TLS→CDN, CDN HTTP→VPS:18081→HAProxy→Xray.
+# В CDN разрешите GET; кеширование отключите; Host к источнику = DOMAIN_NAME.
+# Для источника укажите публичный IP VPS и порт CDN_ORIGIN_PORT.
+# Yandex по умолчанию блокирует POST, поэтому uplink здесь GET + cookie без тела.
+CDN_ENABLED=1
+CDN_ORIGIN_PORT=18081
+CDN_UPLINK_HTTP_METHOD="GET"
+CDN_UPLINK_DATA_PLACEMENT="cookie"
+CDN_UPLINK_CHUNK_SIZE=512
+CDN_PREFIX_URL="https://tech.cdn.yandex.net/prefixes/yc.json"
+
 # Имя этого сервера (SNI, хост в ссылке). На парном relay — EU_SERVER_DOMAIN.
 # Апекс (duba1e.newip.dev → newip.dev) — каталог сертификатов /etc/ssl/newip.dev.
 # Другой апекс: CERT_DOMAIN="example.com"
@@ -15,12 +26,14 @@ DOMAIN_NAME="REGION.nerabotaet.com"
 
 # SUBS_PATH не задаём: один раз пишет secrets, дальше main.sh его не меняет.
 
-# Почта Let's Encrypt (если нет /tmp/fullchain.crt + cert.key).
+# Почта Let's Encrypt (только при CDN_ENABLED=0, если сертификата ещё нет).
 ACME_EMAIL="you@example.com"
 
 # IP через пробел: подписка только им + ufw allow from (все порты).
 # Пусто — main.sh не падает, ufw from нет, подписка без ACL. "*" — всем, ufw from нет.
-ALLOWED_IP="1.2.3.4"
+# При CDN подписка ограничена секретным SUBS_PATH и защищена origin allowlist.
+# ALLOWED_IP фильтрует IP клиента, которого origin за CDN не видит.
+ALLOWED_IP="*"
 
 # Парный backbone (relay, если нет EU_SERVER_LINK).
 EU_SERVER_DOMAIN="EUR_REGION.nerabotaet.com"
@@ -32,7 +45,8 @@ EU_SERVER_PORT=8443
 # Пустой DOWNLOAD_PORT: 8443, если CLIENT_PORT уже 8443 — тогда 443. 0 — без split.
 # Backbone extra не ставит — hop один XHTTP.
 CLIENT_PORT=443
-DOWNLOAD_PORT=8443
+# CDN использует один endpoint для обоих направлений.
+DOWNLOAD_PORT=0
 # DOWNLOAD_HOST=""
 
 # Раздельный транспорт XHTTP: uplink TCP CLIENT_PORT, downlink HTTP/3 по UDP CLIENT_PORT.
@@ -52,8 +66,9 @@ HELLO_FRAG=0
 # EU_SERVER_LINK="vless://uuid@eu.nerabotaet.com:8443?encryption=none&security=tls&sni=eu.nerabotaet.com&fp=chrome&alpn=h2&type=xhttp&path=%2Fsecret&mode=packet-up"
 EU_SERVER_LINK=""
 
-# Ссылка клиенту: stream-up. packet-up только если посередине CDN.
-CLIENT_MODE="stream-up"
+# Ссылка клиенту: при CDN_ENABLED=1 используется packet-up с GET-uplink.
+# Без CDN можно вернуть stream-up.
+CLIENT_MODE="packet-up"
 
 # DNS: AdGuard Home на 127.0.0.1:5353, UI http://127.0.0.1:3000 (не 80/443).
 # Relay: *.ru — DoH Яндекс. Hop — DNS хостера. Остальное — DNS.WATCH.

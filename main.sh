@@ -44,6 +44,9 @@ if [[ "$ROLE" == "relay" ]]; then
   echo "EU_SERVER_PORT: $EU_SERVER_PORT"
 fi
 echo "CLIENT_PORT: $CLIENT_PORT"
+if [[ "$CDN_ENABLED" == "1" ]]; then
+  echo "CDN: HTTP origin :${CDN_ORIGIN_PORT}, uplink=${CDN_UPLINK_HTTP_METHOD}/${CDN_UPLINK_DATA_PLACEMENT} (${CDN_UPLINK_CHUNK_SIZE} B)"
+fi
 if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
   echo "DOWNLOAD_PORT: ${DOWNLOAD_LISTEN:-0}"
   echo "XHTTP_H3_DOWNLOAD: ${XHTTP_H3_DOWNLOAD}"
@@ -68,8 +71,12 @@ ensure_apt_packages python3 curl ca-certificates
 "$PYTHON" --version
 echo ""
 
-install_ssl_certs
-echo ""
+if [[ "$CDN_ENABLED" == "1" ]]; then
+  echo "CDN_ENABLED=1: TLS завершается на CDN; сертификат на VPS не требуется"
+else
+  install_ssl_certs
+  echo ""
+fi
 
 ensure_backup_dir
 echo "Бекапы: $BACKUP_DIR"
@@ -101,7 +108,9 @@ fi
 sudo systemctl unmask haproxy
 sudo systemctl enable haproxy
 backup_if_exists "$HAPROXY_CFG" haproxy.cfg
-install_haproxy_cert
+if [[ "$CDN_ENABLED" != "1" ]]; then
+  install_haproxy_cert
+fi
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "Установка Docker"
