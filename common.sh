@@ -151,7 +151,6 @@ if [[ -z "$CERT_DOMAIN" ]]; then
 fi
 SSL_DIR="${SSL_DIR:-/etc/ssl/${CERT_DOMAIN}}"
 HAPROXY_CERT="${HAPROXY_CERT:-/etc/haproxy/certs/${CERT_DOMAIN}.pem}"
-HOME_SSL_DIR="${HOME_SSL_DIR:-/home/${PROJECT_USER}/${CERT_DOMAIN}}"
 
 if [[ "$ROLE" == "relay" && -z "$EU_SERVER_LINK" ]]; then
   _die "ROLE=relay требует EU_SERVER_LINK в .env (путь подписки backbone в secrets, не каждый main.sh новый)"
@@ -612,7 +611,8 @@ publish_link() {
 # Собирает /usr/local/etc/xray/config.json. В xhttpSettings только path и mode.
 # XHTTP-паддинг ядро ставит само (xPaddingBytes 100-1000, Referer x_padding / X-Padding).
 # DNS только в AdGuard 127.0.0.1:5353.
-# relay: *.ru — Яндекс DoH; hop — DNS хостера; остальное — DoH Google, fallback CF / 8.8.8.8 / 8.8.4.4.
+# relay: *.ru — Яндекс DoH; hop — DNS хостера; остальное — DNS.WATCH.
+# edge/backbone: DNS.WATCH. Всем ролям: fallback DNS Google DoH и публичные DNS IP.
 # edge/backbone уже в EU: UDP/TCP 53 с xhttp-in → этот же AdGuard.
 # Все роли: VLESS+XHTTP на 127.0.0.1 (TLS снимает HAProxy).
 # relay outbound: XHTTP packet-up + TLS на backbone.
@@ -949,7 +949,6 @@ server {{
     real_ip_header proxy_protocol;
 
     root /var/www/html;
-    index index.html;
     server_name _;
 
     location ^~ /.well-known/acme-challenge/ {{
@@ -968,7 +967,7 @@ server {{
     }}
 
     location / {{
-        try_files $uri $uri/ /index.html;
+        try_files $uri $uri/ =404;
     }}
 }}
 """
@@ -993,36 +992,71 @@ install_haproxy_cert() {
   sudo chmod 640 "$HAPROXY_CERT"
 }
 
+_public_ipv4() {
+  curl -4sS --connect-timeout 5 --max-time 8 https://api.ipify.org || true
+}
+
+_dns_a() {
+  local name="$1" ip=""
+  ip="$(getent ahostsv4 "$name" 2>/dev/null | awk '{print $1; exit}' || true)"
+  printf '%s' "$ip"
+  return 0
+}
+
+issue_acme_cert() {
+  local crt="$1" key="$2" live
+  ensure_apt_packages certbot
+  sudo systemctl stop haproxy 2>/dev/null || true
+  sudo systemctl stop nginx 2>/dev/null || true
+  if ! sudo certbot certonly --standalone --preferred-challenges http --non-interactive --agree-tos \
+    --email "${ACME_EMAIL}" -d "$DOMAIN_NAME" --http-01-port 80; then
+    sudo systemctl start nginx 2>/dev/null || true
+    sudo systemctl start haproxy 2>/dev/null || true
+    return 1
+  fi
+  sudo systemctl start nginx 2>/dev/null || true
+  sudo systemctl start haproxy 2>/dev/null || true
+  live="/etc/letsencrypt/live/${DOMAIN_NAME}"
+  sudo install -o "${PROJECT_USER}" -g "${PROJECT_USER}" -m 644 "${live}/fullchain.pem" "$crt"
+  sudo install -o "${PROJECT_USER}" -g "${PROJECT_USER}" -m 640 "${live}/privkey.pem" "$key"
+  echo "ACME Let's Encrypt: ${DOMAIN_NAME}"
+}
+
+issue_domain_cert() {
+  local crt="$1" key="$2" myip dnsip
+  myip="$(_public_ipv4)"
+  dnsip="$(_dns_a "$DOMAIN_NAME")"
+  if [[ -n "${ACME_EMAIL:-}" && -n "$myip" && -n "$dnsip" && "$dnsip" == "$myip" ]]; then
+    echo "DNS ${DOMAIN_NAME}=${dnsip} совпал с VPS — ACME HTTP-01"
+    if issue_acme_cert "$crt" "$key"; then
+      return 0
+    fi
+    _die "ACME не выдал сертификат для ${DOMAIN_NAME}. Проверьте DNS, доступность порта 80 и ACME_EMAIL. Самоподписанный сертификат не создаётся."
+  else
+    _die "Нельзя выпустить сертификат для ${DOMAIN_NAME}: ACME требует ACME_EMAIL и A-запись на этот VPS (DNS=${dnsip:-нет}, VPS=${myip:-нет}). Установите готовую пару /tmp/fullchain.crt и /tmp/cert.key либо положите её в ${SSL_DIR}."
+  fi
+}
+
 install_ssl_certs() {
-  local home_crt="${HOME_SSL_DIR}/fullchain.crt"
-  local home_key="${HOME_SSL_DIR}/cert.key"
-  mkdir -p "$HOME_SSL_DIR"
-  chmod 750 "$HOME_SSL_DIR"
-  chown_project_user "$HOME_SSL_DIR"
+  local ssl_crt="${SSL_DIR}/fullchain.crt"
+  local ssl_key="${SSL_DIR}/cert.key"
+  sudo install -o root -g root -m 755 -d "$SSL_DIR"
 
   if [[ -f /tmp/fullchain.crt && -f /tmp/cert.key ]]; then
-    echo "Сертификаты /tmp -> ${HOME_SSL_DIR}"
-    sudo install -o "${PROJECT_USER}" -g "${PROJECT_USER}" -m 644 /tmp/fullchain.crt "$home_crt"
-    sudo install -o "${PROJECT_USER}" -g "${PROJECT_USER}" -m 640 /tmp/cert.key "$home_key"
+    echo "Сертификаты /tmp -> ${SSL_DIR}"
+    sudo install -o root -g root -m 644 /tmp/fullchain.crt "$ssl_crt"
+    sudo install -o root -g "${XRAY_GROUP}" -m 640 /tmp/cert.key "$ssl_key"
     rm -f /tmp/fullchain.crt /tmp/cert.key
-  elif [[ -f "$home_crt" && -f "$home_key" ]]; then
-    echo "Сертификаты ${HOME_SSL_DIR}"
-  elif [[ -f "${SSL_DIR}/fullchain.crt" && -f "${SSL_DIR}/cert.key" ]]; then
-    echo "Сертификаты ${SSL_DIR} -> ${HOME_SSL_DIR}"
-    sudo install -o "${PROJECT_USER}" -g "${PROJECT_USER}" -m 644 "${SSL_DIR}/fullchain.crt" "$home_crt"
-    sudo install -o "${PROJECT_USER}" -g "${PROJECT_USER}" -m 640 "${SSL_DIR}/cert.key" "$home_key"
+  elif [[ -f "$ssl_crt" && -f "$ssl_key" ]]; then
+    echo "Сертификаты ${SSL_DIR}"
   else
-    echo "Ошибка: нет пары fullchain.crt + cert.key" >&2
-    IPv4="$(curl -4sS https://api.ipify.org || true)"
-    echo "DNS DOMAIN_NAME (${DOMAIN_NAME}) должен смотреть на ${IPv4}." >&2
-    echo "Положите wildcard ${CERT_DOMAIN} в ${HOME_SSL_DIR}/ или в /tmp/{fullchain.crt,cert.key}" >&2
-    exit 1
+    issue_domain_cert "$ssl_crt" "$ssl_key"
   fi
 
-  echo "Установка ${HOME_SSL_DIR} -> ${SSL_DIR}"
-  sudo install -o root -g root -m 755 -d "$SSL_DIR"
-  sudo install -o root -g root -m 644 "$home_crt" "${SSL_DIR}/fullchain.crt"
-  sudo install -o root -g "${XRAY_GROUP}" -m 640 "$home_key" "${SSL_DIR}/cert.key"
+  sudo chown root:root "$ssl_crt"
+  sudo chmod 644 "$ssl_crt"
+  sudo chown root:"${XRAY_GROUP}" "$ssl_key"
+  sudo chmod 640 "$ssl_key"
 }
 
 write_searxng_env() {
@@ -1102,9 +1136,9 @@ dns:
   cache_optimistic: true
   ratelimit: 0
   fallback_dns:
-    - https://cloudflare-dns.com/dns-query
-    - 8.8.8.8
+    - https://dns.google/dns-query
     - 8.8.4.4
+    - 1.1.1.1
 querylog:
   enabled: true
   file_enabled: true
@@ -1181,6 +1215,33 @@ PY
     fi
     rm -f "$yaml_tmp"
   fi
+  # Keep the failover list in sync on existing installs as well as fresh ones.
+  yaml_tmp="$(mktemp)"
+  sudo cat "$yaml" > "$yaml_tmp"
+  if "$PYTHON" - "$yaml_tmp" <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+block = "  fallback_dns:\n    - https://dns.google/dns-query\n    - 8.8.4.4\n    - 1.1.1.1"
+pattern = re.compile(r"(?m)^  fallback_dns:\n(?:^    .*\n|^    .*$)*")
+updated, count = pattern.subn(block + "\n", text, count=1)
+if count == 0:
+    marker = re.search(r"(?m)^querylog:", text)
+    if marker:
+        updated = text[:marker.start()] + block + "\n" + text[marker.start():]
+    else:
+        sys.exit(1)
+if updated != text:
+    open(path, "w", encoding="utf-8").write(updated)
+    sys.exit(0)
+sys.exit(1)
+PY
+  then
+    sudo install -o "$PROJECT_USER" -g "$PROJECT_USER" -m 644 "$yaml_tmp" "$yaml"
+    ADGUARD_NEED_RESTART=1
+    echo "AdGuard: fallback DNS → Google DoH, 8.8.4.4, 1.1.1.1"
+  fi
+  rm -f "$yaml_tmp"
   local eu_hop="${EU_SERVER_DOMAIN:-}"
   if [[ -z "$eu_hop" && -n "${EU_SERVER_LINK:-}" ]]; then
     eu_hop="${EU_SERVER_LINK#*@}"
@@ -1224,14 +1285,11 @@ if role == "relay":
         print("[/" + "/".join(names) + "/]" + hoster_ns())
     print("[/common.dot.dns.yandex.net/]77.88.8.8")
     print("[/ru/su/xn--p1ai/]https://common.dot.dns.yandex.net/dns-query 77.88.8.8")
-    print("[/dns.google/]8.8.8.8")
-    print("[/cloudflare-dns.com/]1.1.1.1")
-    print("https://dns.google/dns-query")
-    print("https://cloudflare-dns.com/dns-query")
-    print("8.8.8.8")
-    print("8.8.4.4")
+    print("84.200.69.80")
+    print("84.200.70.40")
 else:
-    print("https://dns.adguard-dns.com/dns-query")
+    print("84.200.69.80")
+    print("84.200.70.40")
 PY
   if [[ ! -f "$ups" ]] || ! sudo cmp -s "$ups_tmp" "$ups"; then
     sudo install -o "$PROJECT_USER" -g "$PROJECT_USER" -m 644 "$ups_tmp" "$ups"
@@ -1578,7 +1636,7 @@ assert_role_frontends() {
   rm -f "$tmp"
 }
 
-# Живой запрос в AdGuard :5353 + query log. Relay: max.ru → Яндекс DoH, instagram.com → :1053 (EU).
+# Живой запрос в AdGuard :5353 + query log. Relay: max.ru → Яндекс DoH, instagram.com → DNS.WATCH.
 assert_adguard_dns_split() {
   echo "Проверка DNS AdGuard: max.ru и instagram.com @${ADGUARD_DNS_ADDR}:${ADGUARD_DNS_PORT}"
   adguard_chown_tree
@@ -1715,9 +1773,8 @@ for host, expect in checks:
         hit = ("yandex" in low) or ("77.88.8.8" in low)
         want = "DoH Yandex / 77.88.8.8"
     else:
-        hit = ("dns.google" in low) or ("8.8.8.8" in low) or ("8.8.4.4" in low)
-        hit = hit or ("cloudflare" in low) or ("1.1.1.1" in low)
-        want = "DoH Google / CF / 8.8.8.8"
+        hit = ("84.200.69.80" in low) or ("84.200.70.40" in low) or ("dns.watch" in low)
+        want = "DNS.WATCH / 84.200.69.80 / 84.200.70.40"
     if role != "relay":
         print(f"{host}: {ips}  upstream={upstream or '-'}  cached={cached}  (не relay — split не проверяем)")
         continue

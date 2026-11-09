@@ -16,7 +16,7 @@ write_secrets
 echo "EU_UUID=${EU_UUID}"
 echo "EU hop: ${EU_SERVER_DOMAIN}:${EU_SERVER_PORT} path=${EU_XHTTP_PATH} mode=${EU_XHTTP_MODE}"
 
-if [[ -f "$XRAY_CONFIG" ]]; then
+if sudo test -f "$XRAY_CONFIG"; then
   backup_if_exists "$XRAY_CONFIG" xray_eu_uuid.json
   write_xray_config
   restart_xray

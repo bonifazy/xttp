@@ -30,7 +30,6 @@ echo ""
 echo "ROLE: $ROLE"
 echo "DOMAIN_NAME: $DOMAIN_NAME"
 echo "CERT_DOMAIN: $CERT_DOMAIN"
-echo "HOME_SSL_DIR: $HOME_SSL_DIR"
 echo "SSL_DIR: $SSL_DIR"
 if [[ -n "$ALLOWED_IP" ]]; then
   echo "ALLOWED_IP: $ALLOWED_IP"
@@ -90,7 +89,7 @@ sudo systemctl unmask nginx
 sudo systemctl enable nginx
 
 sudo mkdir -p "/var/www/html/${SUBS_PATH}"
-sudo cp "${SCRIPT_DIR}/index.html" "/var/www/html/index.html"
+sudo rm -f /var/www/html/index.html
 sudo chown -R "${PROJECT_USER}:www-data" /var/www/html/
 
 if ! command -v haproxy >/dev/null 2>&1; then
