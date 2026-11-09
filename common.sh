@@ -1688,16 +1688,19 @@ _wait_haproxy_udp_port() {
 # (подписка при этом 200 — как на Helsinki). Backbone: ещё HAProxy на :CLIENT_PORT.
 # relay/edge: TCP DOWNLOAD_LISTEN или HTTP/3 UDP CLIENT_PORT и extra= в подписке.
 assert_role_frontends() {
-  local tls_port="$CLIENT_PORT"
+  local frontend_port="$CLIENT_PORT" tls_port="$CLIENT_PORT"
+  if [[ "$CDN_ENABLED" == "1" ]]; then
+    frontend_port="$CDN_ORIGIN_PORT"
+  fi
   if ! systemctl is-active --quiet xray; then
     sudo journalctl -u xray -n 40 --no-pager >&2 || true
-    _die "xray не active — HAProxy :${tls_port} жив, прокси нет"
+    _die "xray не active — HAProxy :${frontend_port} жив, прокси нет"
   fi
   if ! systemctl is-active --quiet haproxy; then
     sudo journalctl -u haproxy -n 40 --no-pager >&2 || true
-    _die "haproxy не active — :${tls_port} должен держать HAProxy, не Xray"
+    _die "haproxy не active — :${frontend_port} должен держать HAProxy, не Xray"
   fi
-  _wait_haproxy_port "$tls_port"
+  _wait_haproxy_port "$frontend_port"
   if [[ "$XHTTP_H3_DOWNLOAD" == "1" ]]; then
     _wait_haproxy_udp_port "$tls_port"
   fi

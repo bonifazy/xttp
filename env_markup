@@ -12,7 +12,7 @@ ROLE="edge"
 # В CDN разрешите GET; кеширование отключите; Host к источнику = DOMAIN_NAME.
 # Для источника укажите публичный IP VPS и порт CDN_ORIGIN_PORT.
 # Yandex по умолчанию блокирует POST, поэтому uplink здесь GET + cookie без тела.
-CDN_ENABLED=1
+CDN_ENABLED=0
 CDN_ORIGIN_PORT=18081
 CDN_UPLINK_HTTP_METHOD="GET"
 CDN_UPLINK_DATA_PLACEMENT="cookie"
@@ -45,8 +45,8 @@ EU_SERVER_PORT=8443
 # Пустой DOWNLOAD_PORT: 8443, если CLIENT_PORT уже 8443 — тогда 443. 0 — без split.
 # Backbone extra не ставит — hop один XHTTP.
 CLIENT_PORT=443
-# CDN использует один endpoint для обоих направлений.
-DOWNLOAD_PORT=0
+# Пусто — обычное распределение портов по умолчанию; для CDN укажите 0.
+DOWNLOAD_PORT=""
 # DOWNLOAD_HOST=""
 
 # Раздельный транспорт XHTTP: uplink TCP CLIENT_PORT, downlink HTTP/3 по UDP CLIENT_PORT.
@@ -67,8 +67,8 @@ HELLO_FRAG=0
 EU_SERVER_LINK=""
 
 # Ссылка клиенту: при CDN_ENABLED=1 используется packet-up с GET-uplink.
-# Без CDN можно вернуть stream-up.
-CLIENT_MODE="packet-up"
+# При CDN_ENABLED=1 проект автоматически использует packet-up.
+CLIENT_MODE="stream-up"
 
 # DNS: AdGuard Home на 127.0.0.1:5353, UI http://127.0.0.1:3000 (не 80/443).
 # Relay: *.ru — DoH Яндекс. Hop — DNS хостера. Остальное — DNS.WATCH.

@@ -128,8 +128,12 @@ _port() {
     _fail "нет :${p} (${want})"
   fi
 }
-_port 80 http
-_port "$CLIENT_PORT" "HAProxy TLS POST"
+if [[ "$CDN_ENABLED" == "1" ]]; then
+  _port "$CDN_ORIGIN_PORT" "HAProxy HTTP CDN origin"
+else
+  _port 80 http
+  _port "$CLIENT_PORT" "HAProxy TLS"
+fi
 if [[ "$XHTTP_H3_DOWNLOAD" == "1" ]]; then
   udp_out="$(_sudo ss -lunp 2>/dev/null || true)"
   if printf '%s\n' "$udp_out" | grep -E ":${CLIENT_PORT}\\b" | grep -q haproxy; then
@@ -181,7 +185,12 @@ else
     _fail "HAProxy не отдаёт /${primary}/ (is_subs: ${hap_list})"
   fi
   tmp="$(mktemp)"
-  code="$(curl -4sk --http1.1 --max-time 8 -o "$tmp" -w '%{http_code}' --resolve "${DOMAIN_NAME}:${CLIENT_PORT}:127.0.0.1" "$url" || true)"
+  if [[ "$CDN_ENABLED" == "1" ]]; then
+    code="$(curl -sS --http1.1 --max-time 8 -H "Host: ${DOMAIN_NAME}" -o "$tmp" -w '%{http_code}' \
+      "http://127.0.0.1:${CDN_ORIGIN_PORT}/${primary}/update_subs_link" || true)"
+  else
+    code="$(curl -4sk --http1.1 --max-time 8 -o "$tmp" -w '%{http_code}' --resolve "${DOMAIN_NAME}:${CLIENT_PORT}:127.0.0.1" "$url" || true)"
+  fi
   if [[ "$code" == "200" ]] && grep -q '^vless://' "$tmp"; then
     _ok "GET ${url} HTTP ${code}"
   else
