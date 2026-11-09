@@ -55,7 +55,7 @@ XHTTP_MODE="auto"
 EU_XHTTP_MODE="${EU_XHTTP_MODE:-packet-up}"
 # telemt #844: на hop RU→EU режем только TLS ClientHello, не весь TCP.
 # 1 — включено (по умолчанию). 0 — обычный набор без fragment.
-HELLO_FRAG="${HELLO_FRAG:-1}"
+HELLO_FRAG="${HELLO_FRAG:-0}"
 HELLO_FRAG_LENGTH="${HELLO_FRAG_LENGTH:-80-120}"
 HELLO_FRAG_INTERVAL="${HELLO_FRAG_INTERVAL:-8-20}"
 XRAY_XHTTP_LISTEN="127.0.0.1"

@@ -42,8 +42,9 @@ XHTTP_H3_DOWNLOAD=0
 # Hop relay→backbone. По умолчанию packet-up.
 # EU_XHTTP_MODE="packet-up"
 
-# #844: на hop RU→EU режем только TLS ClientHello (патч в бинарнике с Mac). 0 — выключить.
-# HELLO_FRAG=1
+# #844: фрагментация только TLS ClientHello (патч в бинарнике с Mac). По умолчанию выключена.
+# Set 1 only when explicitly enabling ClientHello fragmentation.
+HELLO_FRAG=0
 # HELLO_FRAG_LENGTH="80-120"
 # HELLO_FRAG_INTERVAL="8-20"
 
