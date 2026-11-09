@@ -23,7 +23,7 @@ _sudo() {
 echo "===== xttp status ====="
 echo "ROLE=${ROLE}  DOMAIN=${DOMAIN_NAME}  CLIENT_PORT=${CLIENT_PORT}"
 if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
-  echo "DOWNLOAD_PORT=${DOWNLOAD_LISTEN:-0}  CLIENT_MODE=${CLIENT_MODE}"
+  echo "DOWNLOAD_PORT=${DOWNLOAD_LISTEN:-0}  H3_DOWNLOAD=${XHTTP_H3_DOWNLOAD}  CLIENT_MODE=${CLIENT_MODE}"
 fi
 echo ""
 
@@ -130,6 +130,14 @@ _port() {
 }
 _port 80 http
 _port "$CLIENT_PORT" "HAProxy TLS POST"
+if [[ "$XHTTP_H3_DOWNLOAD" == "1" ]]; then
+  udp_out="$(_sudo ss -lunp 2>/dev/null || true)"
+  if printf '%s\n' "$udp_out" | grep -E ":${CLIENT_PORT}\\b" | grep -q haproxy; then
+    _ok "listen UDP :${CLIENT_PORT} (HAProxy HTTP/3 download)"
+  else
+    _fail "нет UDP :${CLIENT_PORT} (HAProxy HTTP/3 download)"
+  fi
+fi
 [[ -n "${DOWNLOAD_LISTEN:-}" ]] && _port "$DOWNLOAD_LISTEN" "HAProxy TLS GET"
 _port 10085 "xray xhttp"
 _port 8081 nginx

@@ -74,6 +74,7 @@ EU_SERVER_DOMAIN="${EU_SERVER_DOMAIN:-}"
 EU_SERVER_LINK="${EU_SERVER_LINK:-}"
 CLIENT_MODE="${CLIENT_MODE:-stream-up}"
 ACME_EMAIL="${ACME_EMAIL:-}"
+XHTTP_H3_DOWNLOAD="${XHTTP_H3_DOWNLOAD:-0}"
 EU_SNI="${EU_SERVER_DOMAIN}"
 EU_XHTTP_PATH="${EU_XHTTP_PATH:-}"
 
@@ -131,13 +132,20 @@ case "$ROLE" in
   relay|edge|backbone) ;;
   *) _die "ROLE должен быть relay, edge или backbone. Сейчас: '${ROLE}'" ;;
 esac
+case "$XHTTP_H3_DOWNLOAD" in
+  0|1) ;;
+  *) _die "XHTTP_H3_DOWNLOAD должен быть 0 или 1. Сейчас: '${XHTTP_H3_DOWNLOAD}'" ;;
+esac
+if [[ "$XHTTP_H3_DOWNLOAD" == "1" && "$ROLE" == "backbone" ]]; then
+  _die "XHTTP_H3_DOWNLOAD применяется только к ROLE=relay или ROLE=edge; backbone принимает hop по TCP."
+fi
 
 if [[ -z "$DOMAIN_NAME" ]]; then
   _die "В .env пуст DOMAIN_NAME"
 fi
 
 # Wildcard-апекс: duba1e.newip.dev → newip.dev. Override: CERT_DOMAIN в .env.
-# Пара лежит в ~/CERT_DOMAIN, на сервере ещё /etc/ssl/CERT_DOMAIN.
+# Пара хранится в /etc/ssl/CERT_DOMAIN.
 _apex_domain() {
   local h="${1:-}"
   h="${h%.}"
@@ -164,7 +172,7 @@ if [[ ! "$CLIENT_PORT" =~ ^[0-9]+$ ]] || [[ "$CLIENT_PORT" -lt 1 || "$CLIENT_POR
   _die "CLIENT_PORT должен быть 1-65535. Сейчас: '${CLIENT_PORT}'"
 fi
 
-# relay/edge: второй вход в тот же HAProxy. Телефон POST→CLIENT_PORT, GET→DOWNLOAD_LISTEN.
+# relay/edge: телефон POST→CLIENT_PORT; GET через DOWNLOAD_LISTEN (TCP) или H3 по UDP CLIENT_PORT.
 DOWNLOAD_HOST="${DOWNLOAD_HOST:-$DOMAIN_NAME}"
 if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
   _up_port="$CLIENT_PORT"
@@ -364,12 +372,15 @@ build_vless_link() {
   fi
   if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
     dl_port="${DOWNLOAD_LISTEN:-}"
+    if [[ "$XHTTP_H3_DOWNLOAD" == "1" ]]; then
+      dl_port="$client_port"
+    fi
   fi
-  "$PYTHON" - "$uuid" "$DOMAIN_NAME" "$XHTTP_PATH" "$mode" "$client_port" "$dl_host" "$dl_port" <<'PY'
+  "$PYTHON" - "$uuid" "$DOMAIN_NAME" "$XHTTP_PATH" "$mode" "$client_port" "$dl_host" "$dl_port" "$XHTTP_H3_DOWNLOAD" <<'PY'
 import json
 import sys
 from urllib.parse import quote
-uuid, host, path, mode, port, dl_host, dl_port = sys.argv[1:]
+uuid, host, path, mode, port, dl_host, dl_port, h3_download = sys.argv[1:]
 enc_path = quote(path, safe="")
 link = (
     f"vless://{uuid}@{host}:{port}?encryption=none&security=tls"
@@ -378,13 +389,14 @@ link = (
 )
 if dl_port:
     xh_path = path if path.startswith("/") else "/" + path
+    download_alpn = ["h3"] if h3_download == "1" else ["h2"]
     extra = {
         "downloadSettings": {
             "address": dl_host,
             "port": int(dl_port),
             "network": "xhttp",
             "security": "tls",
-            "tlsSettings": {"serverName": host, "fingerprint": "chrome", "alpn": ["h2"]},
+            "tlsSettings": {"serverName": host, "fingerprint": "chrome", "alpn": download_alpn},
             "xhttpSettings": {"path": xh_path, "mode": "auto"},
         }
     }
@@ -516,6 +528,9 @@ apply_ufw() {
   else
     sudo ufw allow "${CLIENT_PORT}/tcp" comment "HTTPS"
   fi
+  if [[ "$XHTTP_H3_DOWNLOAD" == "1" ]]; then
+    sudo ufw allow "${CLIENT_PORT}/udp" comment "XHTTP HTTP/3 download"
+  fi
   if [[ -n "${DOWNLOAD_LISTEN:-}" ]]; then
     sudo ufw allow "${DOWNLOAD_LISTEN}/tcp" comment "HTTPS download"
   fi
@@ -611,8 +626,7 @@ publish_link() {
 # Собирает /usr/local/etc/xray/config.json. В xhttpSettings только path и mode.
 # XHTTP-паддинг ядро ставит само (xPaddingBytes 100-1000, Referer x_padding / X-Padding).
 # DNS только в AdGuard 127.0.0.1:5353.
-# relay: *.ru — Яндекс DoH; hop — DNS хостера; остальное — DNS.WATCH.
-# edge/backbone: DNS.WATCH. Всем ролям: fallback DNS Google DoH и публичные DNS IP.
+# relay: *.ru — Яндекс DoH; hop — DNS хостера; остальное — DNS.WATCH. Edge/backbone — DNS.WATCH.
 # edge/backbone уже в EU: UDP/TCP 53 с xhttp-in → этот же AdGuard.
 # Все роли: VLESS+XHTTP на 127.0.0.1 (TLS снимает HAProxy).
 # relay outbound: XHTTP packet-up + TLS на backbone.
@@ -820,9 +834,10 @@ write_haproxy_config() {
   fi
   "$PYTHON" - "/tmp/haproxy.cfg" "$DOMAIN_NAME" "$SUBS_PATH" "$XHTTP_PATH" \
     "$ALLOWED_IP" "$HAPROXY_CERT" "$XRAY_XHTTP_LISTEN" "$XRAY_XHTTP_PORT" \
-    "$NGINX_FALLBACK" "$DECOY_ADDR" "$tls_port" "$h2_fe_be" "${DOWNLOAD_LISTEN:-}" <<'PY'
+    "$NGINX_FALLBACK" "$DECOY_ADDR" "$tls_port" "$h2_fe_be" "${DOWNLOAD_LISTEN:-}" \
+    "$XHTTP_H3_DOWNLOAD" <<'PY'
 import sys
-dst, domain, subs, xhttp, allowed, cert, xlisten, xport, nginx, decoy, tls_port, h2_fe_be, download_port = sys.argv[1:]
+dst, domain, subs, xhttp, allowed, cert, xlisten, xport, nginx, decoy, tls_port, h2_fe_be, download_port, h3_download = sys.argv[1:]
 tls_port = int(tls_port)
 download_port = int(download_port) if download_port and download_port != "0" else 0
 if h2_fe_be == "1":
@@ -843,6 +858,9 @@ if ips:
     acl_ok = "    acl subs_ok src 127.0.0.1 " + " ".join(ips) + "\n"
     use_subs = "use_backend be_subs if is_subs subs_ok"
 bind_ssl = f"    bind :{tls_port} ssl crt {cert} alpn h2,http/1.1"
+bind_h3 = ""
+if h3_download == "1":
+    bind_h3 = f"\n    bind quic4@0.0.0.0:{tls_port} ssl crt {cert} alpn h3"
 if download_port and download_port != tls_port:
     bind_ssl += f"\n    bind :{download_port} ssl crt {cert} alpn h2,http/1.1"
 if tls_port == 443:
@@ -886,7 +904,7 @@ defaults
 
 frontend fe_tls
     bind :80
-{bind_ssl}
+{bind_ssl}{bind_h3}
 {redir}
     http-response set-header Strict-Transport-Security "max-age=31536000"
 
@@ -916,6 +934,12 @@ backend be_decoy
 with open(dst, "w", encoding="utf-8") as f:
     f.write(cfg)
 PY
+  if [[ "$XHTTP_H3_DOWNLOAD" == "1" ]]; then
+    if [[ -z "$hap_bin" ]] || ! sudo "$hap_bin" -c -f /tmp/haproxy.cfg; then
+      rm -f /tmp/haproxy.cfg
+      _die "HAProxy не поддерживает или не принял QUIC bind. Нужна сборка HAProxy с HTTP/3/QUIC; текущий конфиг не установлен."
+    fi
+  fi
   sudo install -o root -g haproxy -m 640 /tmp/haproxy.cfg "$HAPROXY_CFG"
   rm -f /tmp/haproxy.cfg
 }
@@ -1031,9 +1055,9 @@ issue_domain_cert() {
     if issue_acme_cert "$crt" "$key"; then
       return 0
     fi
-    _die "ACME не выдал сертификат для ${DOMAIN_NAME}. Проверьте DNS, доступность порта 80 и ACME_EMAIL. Самоподписанный сертификат не создаётся."
+    _die "ACME не выдал сертификат для ${DOMAIN_NAME}. Самоподписанный сертификат не создаётся."
   else
-    _die "Нельзя выпустить сертификат для ${DOMAIN_NAME}: ACME требует ACME_EMAIL и A-запись на этот VPS (DNS=${dnsip:-нет}, VPS=${myip:-нет}). Установите готовую пару /tmp/fullchain.crt и /tmp/cert.key либо положите её в ${SSL_DIR}."
+    _die "ACME требует ACME_EMAIL и A-запись на этот VPS (DNS=${dnsip:-нет}, VPS=${myip:-нет}). Положите пару в /tmp/fullchain.crt и /tmp/cert.key или ${SSL_DIR}."
   fi
 }
 
@@ -1041,7 +1065,6 @@ install_ssl_certs() {
   local ssl_crt="${SSL_DIR}/fullchain.crt"
   local ssl_key="${SSL_DIR}/cert.key"
   sudo install -o root -g root -m 755 -d "$SSL_DIR"
-
   if [[ -f /tmp/fullchain.crt && -f /tmp/cert.key ]]; then
     echo "Сертификаты /tmp -> ${SSL_DIR}"
     sudo install -o root -g root -m 644 /tmp/fullchain.crt "$ssl_crt"
@@ -1052,10 +1075,9 @@ install_ssl_certs() {
   else
     issue_domain_cert "$ssl_crt" "$ssl_key"
   fi
-
   sudo chown root:root "$ssl_crt"
   sudo chmod 644 "$ssl_crt"
-  sudo chown root:"${XRAY_GROUP}" "$ssl_key"
+  sudo chown "root:${XRAY_GROUP}" "$ssl_key"
   sudo chmod 640 "$ssl_key"
 }
 
@@ -1137,6 +1159,7 @@ dns:
   ratelimit: 0
   fallback_dns:
     - https://dns.google/dns-query
+    - 8.8.8.8
     - 8.8.4.4
     - 1.1.1.1
 querylog:
@@ -1215,7 +1238,7 @@ PY
     fi
     rm -f "$yaml_tmp"
   fi
-  # Keep the failover list in sync on existing installs as well as fresh ones.
+  # Keep the configured fallback resolvers in sync on existing installs too.
   yaml_tmp="$(mktemp)"
   sudo cat "$yaml" > "$yaml_tmp"
   if "$PYTHON" - "$yaml_tmp" <<'PY'
@@ -1227,10 +1250,9 @@ pattern = re.compile(r"(?m)^  fallback_dns:\n(?:^    .*\n|^    .*$)*")
 updated, count = pattern.subn(block + "\n", text, count=1)
 if count == 0:
     marker = re.search(r"(?m)^querylog:", text)
-    if marker:
-        updated = text[:marker.start()] + block + "\n" + text[marker.start():]
-    else:
-        sys.exit(1)
+    if not marker:
+        sys.exit(2)
+    updated = text[:marker.start()] + block + "\n" + text[marker.start():]
 if updated != text:
     open(path, "w", encoding="utf-8").write(updated)
     sys.exit(0)
@@ -1583,9 +1605,22 @@ _wait_haproxy_port() {
   _die "HAProxy не слушает :${port}"
 }
 
+_wait_haproxy_udp_port() {
+  local port="$1" n
+  for n in 1 2 3 4 5 6 7 8 9 10; do
+    if sudo ss -lunp 2>/dev/null | grep -E ":${port}\\b" | grep -q haproxy; then
+      return 0
+    fi
+    echo "ждём, пока HAProxy откроет UDP :${port} (${n}/10)..."
+    sleep 1
+  done
+  sudo journalctl -u haproxy -n 40 --no-pager >&2 || true
+  _die "HAProxy не слушает UDP :${port}"
+}
+
 # Xray должен быть active на любой роли. Иначе HAProxy отдаёт 502 на XHTTP path
 # (подписка при этом 200 — как на Helsinki). Backbone: ещё HAProxy на :CLIENT_PORT.
-# relay/edge: второй bind DOWNLOAD_LISTEN и extra= в подписке.
+# relay/edge: TCP DOWNLOAD_LISTEN или HTTP/3 UDP CLIENT_PORT и extra= в подписке.
 assert_role_frontends() {
   local tls_port="$CLIENT_PORT"
   if ! systemctl is-active --quiet xray; then
@@ -1597,6 +1632,9 @@ assert_role_frontends() {
     _die "haproxy не active — :${tls_port} должен держать HAProxy, не Xray"
   fi
   _wait_haproxy_port "$tls_port"
+  if [[ "$XHTTP_H3_DOWNLOAD" == "1" ]]; then
+    _wait_haproxy_udp_port "$tls_port"
+  fi
   if [[ -n "${DOWNLOAD_LISTEN:-}" ]]; then
     _wait_haproxy_port "$DOWNLOAD_LISTEN"
   fi

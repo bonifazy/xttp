@@ -9,8 +9,8 @@
 ROLE="edge"
 
 # Имя этого сервера (SNI, хост в ссылке). На парном relay — EU_SERVER_DOMAIN.
-# Апекс (duba1e.newip.dev → newip.dev) — каталог сертификатов ~/newip.dev
-# и /etc/ssl/newip.dev. Другой апекс: CERT_DOMAIN="example.com"
+# Апекс (duba1e.newip.dev → newip.dev) — каталог сертификатов /etc/ssl/newip.dev.
+# Другой апекс: CERT_DOMAIN="example.com"
 DOMAIN_NAME="REGION.nerabotaet.com"
 
 # SUBS_PATH не задаём: один раз пишет secrets, дальше main.sh его не меняет.
@@ -35,6 +35,10 @@ CLIENT_PORT=443
 DOWNLOAD_PORT=8443
 # DOWNLOAD_HOST=""
 
+# Раздельный транспорт XHTTP: uplink TCP CLIENT_PORT, downlink HTTP/3 по UDP CLIENT_PORT.
+# Включать после подтверждения поддержки QUIC установленной сборкой HAProxy.
+XHTTP_H3_DOWNLOAD=0
+
 # Hop relay→backbone. По умолчанию packet-up.
 # EU_XHTTP_MODE="packet-up"
 
@@ -52,7 +56,7 @@ CLIENT_MODE="stream-up"
 
 # DNS: AdGuard Home на 127.0.0.1:5353, UI http://127.0.0.1:3000 (не 80/443).
 # Relay: *.ru — DoH Яндекс. Hop — DNS хостера. Остальное — DNS.WATCH.
-# Edge/backbone — DNS.WATCH. При сбое upstream AdGuard использует Google DoH, 8.8.4.4 и 1.1.1.1.
+# Edge/backbone — DNS.WATCH. При сбое используются Google DoH, 8.8.4.4 и 1.1.1.1.
 # Edge/backbone уже в Европе: резолвят сами, :53 из туннеля тоже в этот AdGuard.
 # Кеш в RAM: короткий TTL с апстрима поднимаем до ttl_min, чтобы реже звать Яндекс/EU.
 # ADGUARD_CACHE_TTL_MIN=604800

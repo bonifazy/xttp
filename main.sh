@@ -9,7 +9,7 @@
 #      (XHTTP packet-up). SUBS_PATH из secrets; новый только если пусто.
 #
 # Идемпотентно: .xttp_secrets не перезаписывает. Конфиги собирает заново.
-# ROLE=relay/edge: клиентская ссылка — XHTTP stream-up + alpn=h2 + extra.downloadSettings (GET на второй порт).
+# ROLE=relay/edge: клиентская ссылка — XHTTP stream-up; downloadSettings использует TCP второй порт или HTTP/3.
 # ROLE=backbone: ссылка для relay — XHTTP packet-up; снаружи HAProxy+SearXNG.
 # Xray: готовый ELF из xray-core/xray-linux-* (сборка на Mac: ./build_xray_release.sh).
 # Патч hello_frag внутри бинарника. С GitHub/Xray-install не качаем.
@@ -46,6 +46,7 @@ fi
 echo "CLIENT_PORT: $CLIENT_PORT"
 if [[ "$ROLE" == "relay" || "$ROLE" == "edge" ]]; then
   echo "DOWNLOAD_PORT: ${DOWNLOAD_LISTEN:-0}"
+  echo "XHTTP_H3_DOWNLOAD: ${XHTTP_H3_DOWNLOAD}"
   echo "CLIENT_MODE: $CLIENT_MODE"
 fi
 if [[ "$ROLE" == "relay" || "$ROLE" == "backbone" ]]; then
