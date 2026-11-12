@@ -1,5 +1,8 @@
 .env
+.env.bak.*
 .xttp_secrets
+.warp_secrets
+.warp-work/
 .idea/
 *.log
 searxng/.env

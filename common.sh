@@ -81,6 +81,14 @@ CDN_UPLINK_CHUNK_SIZE="${CDN_UPLINK_CHUNK_SIZE:-512}"
 CDN_PREFIX_URL="${CDN_PREFIX_URL:-https://tech.cdn.yandex.net/prefixes/yc.json}"
 ACME_EMAIL="${ACME_EMAIL:-}"
 XHTTP_H3_DOWNLOAD="${XHTTP_H3_DOWNLOAD:-0}"
+WARP_ENABLED="${WARP_ENABLED:-0}"
+WARP_PRIVATE_KEY="${WARP_PRIVATE_KEY:-}"
+WARP_ADDRESS="${WARP_ADDRESS:-}"
+WARP_RESERVED="${WARP_RESERVED:-}"
+WARP_ENDPOINT="${WARP_ENDPOINT:-engage.cloudflareclient.com:2408}"
+WARP_PUBLIC_KEY="${WARP_PUBLIC_KEY:-bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=}"
+WARP_MTU="${WARP_MTU:-1280}"
+WARP_DOMAINS="${WARP_DOMAINS:-instagram.com,cdninstagram.com,fbcdn.net,ig.me,strava.com,strava-cdn.com,stravausercontent.com}"
 EU_SNI="${EU_SERVER_DOMAIN}"
 EU_XHTTP_PATH="${EU_XHTTP_PATH:-}"
 
@@ -88,6 +96,10 @@ if [[ -f "$SECRETS_FILE" ]]; then
   # shellcheck source=/home/dim/xttp/.xttp_secrets
   # shellcheck disable=SC1091
   source "$SECRETS_FILE"
+fi
+if [[ -f "${SCRIPT_DIR}/.warp_secrets" ]]; then
+  # shellcheck disable=SC1091
+  source "${SCRIPT_DIR}/.warp_secrets"
 fi
 
 SUBS_PATH="${SUBS_PATH:-}"
@@ -163,6 +175,19 @@ case "$XHTTP_H3_DOWNLOAD" in
 esac
 if [[ "$XHTTP_H3_DOWNLOAD" == "1" && "$ROLE" == "backbone" ]]; then
   _die "XHTTP_H3_DOWNLOAD применяется только к ROLE=relay или ROLE=edge; backbone принимает hop по TCP."
+fi
+case "$WARP_ENABLED" in
+  0|1) ;;
+  *) _die "WARP_ENABLED должен быть 0 или 1. Сейчас: '${WARP_ENABLED}'" ;;
+esac
+if [[ "$WARP_ENABLED" == "1" ]]; then
+  [[ "$ROLE" == "edge" ]] || _die "WARP_ENABLED пока поддерживается только для ROLE=edge"
+  [[ -n "$WARP_PRIVATE_KEY" && -n "$WARP_ADDRESS" ]] || _die "WARP_ENABLED=1 требует WARP_PRIVATE_KEY и WARP_ADDRESS из WARP WireGuard-профиля"
+  [[ -n "$WARP_DOMAINS" ]] || _die "WARP_ENABLED=1 требует хотя бы один домен в WARP_DOMAINS"
+  [[ "$WARP_MTU" =~ ^[0-9]+$ ]] && [[ "$WARP_MTU" -ge 576 && "$WARP_MTU" -le 1420 ]] || _die "WARP_MTU должен быть числом от 576 до 1420"
+  if [[ -n "$WARP_RESERVED" && ! "$WARP_RESERVED" =~ ^[0-9]+,[0-9]+,[0-9]+$ ]]; then
+    _die "WARP_RESERVED должен быть пустым или тремя числами через запятую (например 1,2,3)"
+  fi
 fi
 
 if [[ -z "$DOMAIN_NAME" ]]; then
@@ -703,7 +728,9 @@ write_xray_config() {
     "${EU_XHTTP_PATH:-}" "${EU_XHTTP_MODE:-packet-up}" "${CERT_DOMAIN:-}" \
     "${ADGUARD_DNS_ADDR}" "${ADGUARD_DNS_PORT}" \
     "${ADGUARD_VIA_EU_PORT}" "${ADGUARD_VIA_EU_DEST}" \
-    "$CDN_ENABLED" "$CDN_UPLINK_HTTP_METHOD" "$CDN_UPLINK_DATA_PLACEMENT" "$CDN_UPLINK_CHUNK_SIZE" <<'PY'
+    "$CDN_ENABLED" "$CDN_UPLINK_HTTP_METHOD" "$CDN_UPLINK_DATA_PLACEMENT" "$CDN_UPLINK_CHUNK_SIZE" \
+    "$WARP_ENABLED" "$WARP_PRIVATE_KEY" "$WARP_ADDRESS" "$WARP_RESERVED" \
+    "$WARP_ENDPOINT" "$WARP_PUBLIC_KEY" "$WARP_MTU" "$WARP_DOMAINS" <<'PY'
 import json, sys
 
 (
@@ -712,11 +739,14 @@ import json, sys
     eu_xhttp_path, eu_xhttp_mode, cert_domain,
     ag_addr, ag_port, via_eu_port, via_eu_dest,
     cdn_enabled, cdn_uplink_method, cdn_data_placement, cdn_chunk_size,
+    warp_enabled, warp_private_key, warp_address, warp_reserved,
+    warp_endpoint, warp_public_key, warp_mtu, warp_domains,
 ) = sys.argv[1:]
 xport = int(xport)
 eu_port = int(eu_port) if eu_port else 443
 ag_port = int(ag_port)
 via_eu_port = int(via_eu_port)
+warp_mtu = int(warp_mtu)
 
 
 def xhttp_settings(path, mode, cdn=False):
@@ -833,6 +863,36 @@ else:
         {"type": "field", "domain": ["geosite:category-ads-all", "geosite:category-public-tracker"], "outboundTag": "block"},
         {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"},
     ]
+    if role == "edge" and warp_enabled == "1":
+        outbounds.append({
+            "protocol": "wireguard",
+            "tag": "warp",
+            "settings": {
+                "secretKey": warp_private_key,
+                "address": [part.strip() for part in warp_address.split(",") if part.strip()],
+                "peers": [{
+                    "publicKey": warp_public_key,
+                    "endpoint": warp_endpoint,
+                    "allowedIPs": ["0.0.0.0/0", "::/0"],
+                }],
+                "mtu": warp_mtu,
+                **({"reserved": [int(part) for part in warp_reserved.split(",")]} if warp_reserved else {}),
+            },
+        })
+        domains = []
+        for item in warp_domains.replace(",", " ").split():
+            item = item.strip()
+            if item and ":" not in item:
+                item = "domain:" + item
+            if item and item not in domains:
+                domains.append(item)
+        if not domains:
+            raise SystemExit("WARP_ENABLED=1 требует домены в WARP_DOMAINS")
+        rules.append({
+            "type": "field",
+            "domain": domains,
+            "outboundTag": "warp",
+        })
 
 cfg = {
     "log": log,

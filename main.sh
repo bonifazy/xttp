@@ -44,6 +44,10 @@ if [[ "$ROLE" == "relay" ]]; then
   echo "EU_SERVER_PORT: $EU_SERVER_PORT"
 fi
 echo "CLIENT_PORT: $CLIENT_PORT"
+echo "WARP_ENABLED: ${WARP_ENABLED}"
+if [[ "$WARP_ENABLED" == "1" ]]; then
+  echo "WARP_DOMAINS: ${WARP_DOMAINS}"
+fi
 if [[ "$CDN_ENABLED" == "1" ]]; then
   echo "CDN: HTTP origin :${CDN_ORIGIN_PORT}, uplink=${CDN_UPLINK_HTTP_METHOD}/${CDN_UPLINK_DATA_PLACEMENT} (${CDN_UPLINK_CHUNK_SIZE} B)"
 fi

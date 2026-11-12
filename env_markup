@@ -70,6 +70,15 @@ EU_SERVER_LINK=""
 # При CDN_ENABLED=1 проект автоматически использует packet-up.
 CLIENT_MODE="stream-up"
 
+# Выборочный WARP egress только на ROLE=edge; трафик Instagram/Strava идёт через WARP.
+# Ключ/адрес/reserved возьмите из WireGuard-конфига WARP, не публикуйте и не коммитьте ключ.
+WARP_ENABLED=0
+WARP_DOMAINS="instagram.com,cdninstagram.com,fbcdn.net,ig.me,strava.com,strava-cdn.com,stravausercontent.com"
+# При WARP_ENABLED=1 запустите `./warp_setup.sh`: он зарегистрирует WARP,
+# сохранит профиль в `.warp_secrets` и применит outbound. При 0 ничего не делает.
+# Можно добавлять домены через запятую или пробел, например:
+# WARP_DOMAINS="instagram.com,cdninstagram.com example.org"
+
 # DNS: AdGuard Home на 127.0.0.1:5353, UI http://127.0.0.1:3000 (не 80/443).
 # Relay: *.ru — DoH Яндекс. Hop — DNS хостера. Остальное — DNS.WATCH.
 # Edge/backbone — DNS.WATCH. При сбое используются Google DoH, 8.8.4.4 и 1.1.1.1.
