@@ -4,6 +4,8 @@
 #   1. .env из env_markup — ROLE и переменные для этой роли
 #   2. Сертификаты: /tmp/{fullchain.crt,cert.key} (купленный wildcard) или
 #      Let's Encrypt на DOMAIN_NAME (ACME_EMAIL в .env, автообновление)
+#      При паре в /tmp CERT_DOMAIN определяется по SAN сертификата, который
+#      обязан покрывать DOMAIN_NAME; пара копируется в /etc/ssl/<CERT_DOMAIN>.
 #   3. DNS DOMAIN_NAME смотрит на этот VPS
 #   4. ROLE=relay: EU_SERVER_LINK = постоянная vless-ссылка backbone
 #      (XHTTP packet-up). SUBS_PATH из secrets; новый только если пусто.
@@ -17,6 +19,10 @@ set -euo pipefail
 
 # shellcheck disable=SC1091
 source /home/dim/xttp/common.sh
+if [[ -e /tmp/fullchain.crt || -e /tmp/cert.key ]]; then
+  ensure_apt_packages openssl
+fi
+resolve_tmp_certificate_domain
 
 if [[ -z "${SUBS_PATH:-}" ]]; then
   SUBS_PATH="$(generate_subs_path)"

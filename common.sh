@@ -210,6 +210,54 @@ fi
 SSL_DIR="${SSL_DIR:-/etc/ssl/${CERT_DOMAIN}}"
 HAPROXY_CERT="${HAPROXY_CERT:-/etc/haproxy/certs/${CERT_DOMAIN}.pem}"
 
+# Если пара сертификатов лежит в /tmp, SAN сертификата определяет CERT_DOMAIN
+# и каталог назначения. До копирования проверяются целостность, срок, ключ и
+# соответствие сертификата текущему DOMAIN_NAME.
+resolve_tmp_certificate_domain() {
+  local crt=/tmp/fullchain.crt key=/tmp/cert.key
+  local domain_host san_output san suffix left cert_domain=""
+  local cert_pub key_pub
+
+  if [[ ! -e "$crt" && ! -e "$key" ]]; then
+    return 0
+  fi
+  [[ -f "$crt" && -f "$key" ]] || _die "В /tmp должна быть полная пара сертификатов: fullchain.crt и cert.key"
+  command -v openssl >/dev/null 2>&1 || _die "Для проверки сертификатов из /tmp нужен openssl"
+
+  openssl x509 -in "$crt" -noout -checkend 0 >/dev/null 2>&1 || _die "Сертификат /tmp/fullchain.crt повреждён или истёк"
+  cert_pub="$(openssl x509 -in "$crt" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | sha256sum | awk '{print $1}')" || _die "Не удалось прочитать публичный ключ сертификата /tmp/fullchain.crt"
+  key_pub="$(openssl pkey -in "$key" -pubout -outform DER 2>/dev/null | sha256sum | awk '{print $1}')" || _die "Не удалось прочитать приватный ключ /tmp/cert.key"
+  [[ -n "$cert_pub" && "$cert_pub" == "$key_pub" ]] || _die "Сертификат /tmp/fullchain.crt не соответствует ключу /tmp/cert.key"
+
+  domain_host="${DOMAIN_NAME,,}"
+  domain_host="${domain_host%.}"
+  domain_host="${domain_host%%:*}"
+  san_output="$(openssl x509 -in "$crt" -noout -ext subjectAltName 2>/dev/null)" || _die "В сертификате /tmp/fullchain.crt отсутствует subjectAltName"
+  while IFS= read -r san; do
+    san="${san,,}"
+    san="${san%.}"
+    if [[ "$san" == \*.* ]]; then
+      suffix="${san#*.}"
+      if [[ "$domain_host" == *."$suffix" ]]; then
+        left="${domain_host%.$suffix}"
+        if [[ -n "$left" && "$left" != *.* ]]; then
+          cert_domain="$suffix"
+          break
+        fi
+      fi
+    elif [[ "$domain_host" == "$san" ]]; then
+      cert_domain="$(_apex_domain "$san")"
+      break
+    fi
+  done < <(printf '%s\n' "$san_output" | grep -oE 'DNS:[^,[:space:]]+' | sed 's/^DNS://')
+
+  [[ -n "$cert_domain" ]] || _die "Сертификат из /tmp не покрывает DOMAIN_NAME=${DOMAIN_NAME}; файлы оставлены на месте"
+  CERT_DOMAIN="$cert_domain"
+  SSL_DIR="/etc/ssl/${CERT_DOMAIN}"
+  HAPROXY_CERT="/etc/haproxy/certs/${CERT_DOMAIN}.pem"
+  echo "CERT_DOMAIN по SAN сертификата из /tmp: ${CERT_DOMAIN} (DOMAIN_NAME=${DOMAIN_NAME})"
+}
+
 if [[ "$ROLE" == "relay" && -z "$EU_SERVER_LINK" ]]; then
   _die "ROLE=relay требует EU_SERVER_LINK в .env (путь подписки backbone в secrets, не каждый main.sh новый)"
 fi

@@ -1,89 +1,44 @@
-# Скопируйте в .env и заполните строки для своей роли.
-# relay — RU: телефон → HAProxy :CLIENT_PORT XHTTP → backbone packet-up
-# edge — EU для клиентов: HAProxy :CLIENT_PORT XHTTP → freedom
-# backbone — EU: HAProxy :CLIENT_PORT, принимает relay
-#
-# XHTTP: packet-up — hop/CDN; stream-up — телефон напрямую; auto — inbound.
-# stream-one не используем (Vision). Паддинг ядро ставит само.
-
 ROLE="edge"
 
-# Yandex Cloud CDN: клиент TLS→CDN, CDN HTTP→VPS:18081→HAProxy→Xray.
-# В CDN разрешите GET; кеширование отключите; Host к источнику = DOMAIN_NAME.
-# Для источника укажите публичный IP VPS и порт CDN_ORIGIN_PORT.
-# Yandex по умолчанию блокирует POST, поэтому uplink здесь GET + cookie без тела.
-CDN_ENABLED=0
-CDN_ORIGIN_PORT=18081
-CDN_UPLINK_HTTP_METHOD="GET"
-CDN_UPLINK_DATA_PLACEMENT="cookie"
-CDN_UPLINK_CHUNK_SIZE=512
-CDN_PREFIX_URL="https://tech.cdn.yandex.net/prefixes/yc.json"
+# DOMAIN_NAME="REGION.nerabotaet.com"
+# DOMAIN_NAME="REGION.newip.dev"
 
-# Имя этого сервера (SNI, хост в ссылке). На парном relay — EU_SERVER_DOMAIN.
-# Апекс (duba1e.newip.dev → newip.dev) — каталог сертификатов /etc/ssl/newip.dev.
-# Другой апекс: CERT_DOMAIN="example.com"
-DOMAIN_NAME="REGION.nerabotaet.com"
+ALLOWED_IP="31.148.6.240 62.113.113.93 91.212.150.50 93.183.92.89 178.159.94.30 91.201.112.87"
 
-# SUBS_PATH не задаём: один раз пишет secrets, дальше main.sh его не меняет.
-
-# Почта Let's Encrypt (только при CDN_ENABLED=0, если сертификата ещё нет).
-ACME_EMAIL="you@example.com"
-
-# IP через пробел: подписка только им + ufw allow from (все порты).
-# Пусто — main.sh не падает, ufw from нет, подписка без ACL. "*" — всем, ufw from нет.
-# При CDN подписка ограничена секретным SUBS_PATH и защищена origin allowlist.
-# ALLOWED_IP фильтрует IP клиента, которого origin за CDN не видит.
-ALLOWED_IP="*"
-
-# Парный backbone (relay, если нет EU_SERVER_LINK).
-EU_SERVER_DOMAIN="EUR_REGION.nerabotaet.com"
-
-# Hop relay→backbone (порт в EU_SERVER_LINK). Не слушатель этого VPS.
-EU_SERVER_PORT=8443
-
-# Публичный TLS, все роли. Иначе 443. Relay/edge: POST; GET = DOWNLOAD_PORT.
-# Пустой DOWNLOAD_PORT: 8443, если CLIENT_PORT уже 8443 — тогда 443. 0 — без split.
-# Backbone extra не ставит — hop один XHTTP.
 CLIENT_PORT=443
-# Пусто — обычное распределение портов по умолчанию; для CDN укажите 0.
-DOWNLOAD_PORT=""
+# if you use CDN, set download port: 0.
+DOWNLOAD_PORT=0
 # DOWNLOAD_HOST=""
-
-# Раздельный транспорт XHTTP: uplink TCP CLIENT_PORT, downlink HTTP/3 по UDP CLIENT_PORT.
-# Включать после подтверждения поддержки QUIC установленной сборкой HAProxy.
+# Split tunneling XHTTP: uplink TCP CLIENT_PORT, downlink HTTP/3 UDP CLIENT_PORT.
+# Turn on only if QUIC supported by HAProxy.
 XHTTP_H3_DOWNLOAD=0
 
-# Hop relay→backbone. По умолчанию packet-up.
-# EU_XHTTP_MODE="packet-up"
-
-# #844: фрагментация только TLS ClientHello (патч в бинарнике с Mac). По умолчанию выключена.
-# Set 1 only when explicitly enabling ClientHello fragmentation.
-HELLO_FRAG=0
-# HELLO_FRAG_LENGTH="80-120"
-# HELLO_FRAG_INTERVAL="8-20"
-
-# Relay: постоянная vless-ссылка backbone (обязательна: путь подписки backbone каждый main.sh новый).
-# EU_SERVER_LINK="vless://uuid@eu.nerabotaet.com:8443?encryption=none&security=tls&sni=eu.nerabotaet.com&fp=chrome&alpn=h2&type=xhttp&path=%2Fsecret&mode=packet-up"
-EU_SERVER_LINK=""
-
-# Ссылка клиенту: при CDN_ENABLED=1 используется packet-up с GET-uplink.
-# При CDN_ENABLED=1 проект автоматически использует packet-up.
+# If CDN_ENABLED=1, project auto set-up mode to packet-up.
 CLIENT_MODE="stream-up"
 
-# Выборочный WARP egress только на ROLE=edge; трафик Instagram/Strava идёт через WARP.
-# Ключ/адрес/reserved возьмите из WireGuard-конфига WARP, не публикуйте и не коммитьте ключ.
+# *** Specific settings! ***
+
+# Yandex Cloud CDN: TLS→CDN, CDN HTTP→VPS:18081→HAProxy→Xray
+# CDN_ENABLED=0
+# CDN_ORIGIN_PORT=18081
+# CDN_UPLINK_HTTP_METHOD="GET"
+# CDN_UPLINK_DATA_PLACEMENT="cookie"
+# CDN_UPLINK_CHUNK_SIZE=512
+# CDN_PREFIX_URL="https://tech.cdn.yandex.net/prefixes/yc.json"
+
+# Set domain without wildcard cert
+# ACME_EMAIL="you@example.com"
+
+# current role 'relay': backbone EU_SERVER_LINK="vless://..."
+EU_SERVER_LINK=""
+# current role 'relay': backbone domain, if EU_SERVER_LINK is not specified
+EU_SERVER_DOMAIN="EUR_REGION.nerabotaet.com"
+# current role 'relay': EU_SERVER_LINK port
+EU_SERVER_PORT=443
+
+# current role: edge
+# if WARP_ENABLED=1, run: `./warp_setup.sh`: register WARP to .warp_secrets. If params is 0 -- do nothing.
 WARP_ENABLED=0
 WARP_DOMAINS="instagram.com,cdninstagram.com,fbcdn.net,ig.me,strava.com,strava-cdn.com,stravausercontent.com"
-# При WARP_ENABLED=1 запустите `./warp_setup.sh`: он зарегистрирует WARP,
-# сохранит профиль в `.warp_secrets` и применит outbound. При 0 ничего не делает.
-# Можно добавлять домены через запятую или пробел, например:
-# WARP_DOMAINS="instagram.com,cdninstagram.com example.org"
 
-# DNS: AdGuard Home на 127.0.0.1:5353, UI http://127.0.0.1:3000 (не 80/443).
-# Relay: *.ru — DoH Яндекс. Hop — DNS хостера. Остальное — DNS.WATCH.
-# Edge/backbone — DNS.WATCH. При сбое используются Google DoH, 8.8.4.4 и 1.1.1.1.
-# Edge/backbone уже в Европе: резолвят сами, :53 из туннеля тоже в этот AdGuard.
-# Кеш в RAM: короткий TTL с апстрима поднимаем до ttl_min, чтобы реже звать Яндекс/EU.
-# ADGUARD_CACHE_TTL_MIN=604800
-# ADGUARD_CACHE_TTL_MAX=0
-# ADGUARD_CACHE_SIZE=268435456
+
