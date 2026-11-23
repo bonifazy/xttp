@@ -85,9 +85,18 @@ WARP_ENABLED="${WARP_ENABLED:-0}"
 WARP_PRIVATE_KEY="${WARP_PRIVATE_KEY:-}"
 WARP_ADDRESS="${WARP_ADDRESS:-}"
 WARP_RESERVED="${WARP_RESERVED:-}"
+WARP_ENDPOINT_EDGE="${WARP_ENDPOINT_EDGE:-162.159.195.1:2408}"
+WARP_ENDPOINT_RELAY="${WARP_ENDPOINT_RELAY:-8.34.70.140:2408}"
 _WARP_ENDPOINT_FROM_ENV=""
 if grep -qE '^[[:space:]]*WARP_ENDPOINT=' "${SCRIPT_DIR}/.env"; then
   _WARP_ENDPOINT_FROM_ENV="${WARP_ENDPOINT:-}"
+fi
+if [[ -z "${WARP_ENDPOINT:-}" ]]; then
+  if [[ "$ROLE" == "edge" ]]; then
+    WARP_ENDPOINT="$WARP_ENDPOINT_EDGE"
+  elif [[ "$ROLE" == "relay" ]]; then
+    WARP_ENDPOINT="$WARP_ENDPOINT_RELAY"
+  fi
 fi
 WARP_ENDPOINT="${WARP_ENDPOINT:-engage.cloudflareclient.com:2408}"
 WARP_PUBLIC_KEY="${WARP_PUBLIC_KEY:-bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=}"
@@ -105,9 +114,13 @@ if [[ -f "${SCRIPT_DIR}/.warp_secrets" ]]; then
   # shellcheck disable=SC1091
   source "${SCRIPT_DIR}/.warp_secrets"
 fi
-# Пин из .env (HEL 8.34.70.140) важнее endpoint, который записал wgcf.
+# Пин из .env важнее endpoint, который записал wgcf.
 if [[ -n "${_WARP_ENDPOINT_FROM_ENV:-}" ]]; then
   WARP_ENDPOINT="${_WARP_ENDPOINT_FROM_ENV}"
+elif [[ "$ROLE" == "edge" ]]; then
+  WARP_ENDPOINT="$WARP_ENDPOINT_EDGE"
+elif [[ "$ROLE" == "relay" ]]; then
+  WARP_ENDPOINT="$WARP_ENDPOINT_RELAY"
 fi
 if [[ -n "${WARP_ENDPOINT:-}" && "$WARP_ENDPOINT" != *:* ]]; then
   WARP_ENDPOINT="${WARP_ENDPOINT}:2408"
@@ -980,6 +993,9 @@ else:
     if role == "edge" and warp_enabled == "1":
         outbounds.append(warp_outbound())
         rules.append({"type": "field", "domain": warp_domain_list(), "outboundTag": "warp"})
+        ru_warp = ["geosite:category-ru", "regexp:.*\\.ru$", "regexp:.*\\.su$", "domain:xn--p1ai"]
+        rules.append({"type": "field", "domain": ru_warp, "outboundTag": "warp"})
+        rules.append({"type": "field", "ip": ["geoip:ru"], "outboundTag": "warp"})
 
 cfg = {
     "log": log,

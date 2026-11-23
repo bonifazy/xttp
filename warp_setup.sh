@@ -23,6 +23,13 @@ if [[ "${WARP_ENABLED:-0}" == "0" ]]; then
 fi
 [[ "${WARP_ENABLED:-}" == "1" ]] || fail "укажите WARP_ENABLED=0 или WARP_ENABLED=1 в .env"
 [[ "${ROLE:-}" == "edge" || "${ROLE:-}" == "relay" ]] || fail "WARP outbound поддерживается на ROLE=edge или relay"
+if [[ -z "${WARP_ENDPOINT:-}" ]]; then
+  if [[ "$ROLE" == "edge" ]]; then
+    WARP_ENDPOINT="${WARP_ENDPOINT_EDGE:-162.159.195.1:2408}"
+  elif [[ "$ROLE" == "relay" ]]; then
+    WARP_ENDPOINT="${WARP_ENDPOINT_RELAY:-8.34.70.140:2408}"
+  fi
+fi
 if [[ -n "${WARP_ENDPOINT:-}" && "$WARP_ENDPOINT" != *:* ]]; then
   WARP_ENDPOINT="${WARP_ENDPOINT}:2408"
 fi

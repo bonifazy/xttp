@@ -37,9 +37,13 @@ EU_SERVER_DOMAIN="EUR_REGION.nerabotaet.com"
 EU_SERVER_PORT=443
 
 # ROLE=edge|relay: WARP_ENABLED=1 → `./warp_setup.sh` (профиль в .warp_secrets). 0 — не трогать.
-# Relay: домены из WARP_DOMAINS идут в WARP. Остальное — EU hop, либо весь зарубежный выход в WARP без hop.
+# Relay: WARP_DOMAINS → WARP. Остальное — EU hop, либо весь зарубежный выход в WARP без hop.
+# Edge + WARP: WARP_DOMAINS, *.ru/.su/.рф и geoip:ru → WARP; остальное direct с VPS.
 WARP_ENABLED=0
-WARP_ENDPOINT=8.34.70.140:2408
+# Пин colo. Пустой WARP_ENDPOINT → по ROLE: edge=Москва DME, relay=HEL.
+WARP_ENDPOINT_EDGE=162.159.195.1:2408
+WARP_ENDPOINT_RELAY=8.34.70.140:2408
+# WARP_ENDPOINT=162.159.195.1:2408
 WARP_DOMAINS="instagram.com,cdninstagram.com,fbcdn.net,ig.me,strava.com,strava-cdn.com,stravausercontent.com"
 # YouTube через WARP (правьте список для следующего RU relay):
 WARP_DOMAINS="${WARP_DOMAINS},youtube.com,youtu.be,yt.be,youtube-nocookie.com,youtubekids.com,googlevideo.com,ytimg.com,ggpht.com"
