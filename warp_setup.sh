@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Register this edge VPS in Cloudflare WARP and install its Xray WireGuard outbound.
+# Register this edge/relay VPS in Cloudflare WARP and install its Xray WireGuard outbound.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,7 +22,10 @@ if [[ "${WARP_ENABLED:-0}" == "0" ]]; then
   exit 0
 fi
 [[ "${WARP_ENABLED:-}" == "1" ]] || fail "укажите WARP_ENABLED=0 или WARP_ENABLED=1 в .env"
-[[ "${ROLE:-}" == "edge" ]] || fail "WARP outbound поддерживается только на ROLE=edge"
+[[ "${ROLE:-}" == "edge" || "${ROLE:-}" == "relay" ]] || fail "WARP outbound поддерживается на ROLE=edge или relay"
+if [[ -n "${WARP_ENDPOINT:-}" && "$WARP_ENDPOINT" != *:* ]]; then
+  WARP_ENDPOINT="${WARP_ENDPOINT}:2408"
+fi
 command -v curl >/dev/null || fail "нужен curl"
 command -v sha256sum >/dev/null || fail "нужен sha256sum"
 command -v python3 >/dev/null || fail "нужен python3"
@@ -40,12 +43,12 @@ esac
 asset="wgcf_${WGCF_VERSION}_linux_${wgcf_arch}"
 base_url="https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VERSION}"
 
-curl -fsSLo checksums.txt "${base_url}/checksums.txt"
+curl -4fsSLo checksums.txt --connect-timeout 8 --max-time 25 "${base_url}/checksums.txt"
 printf '%s  %s\n' "$CHECKSUMS_SHA256" checksums.txt | sha256sum -c - >/dev/null \
   || fail "SHA-256 checksum list wgcf не совпал"
 grep -E "^[[:xdigit:]]{64}[[:space:]]+${asset}$" checksums.txt > asset.sha256 \
   || fail "релиз wgcf не содержит бинарник ${asset}"
-curl -fsSLo "$asset" "${base_url}/${asset}"
+curl -4fsSLo "$asset" --connect-timeout 8 --max-time 25 "${base_url}/${asset}"
 sha256sum -c asset.sha256 >/dev/null || fail "SHA-256 бинарника wgcf не совпал"
 chmod 700 "$asset"
 
@@ -63,7 +66,7 @@ fi
 chmod 600 wgcf-account.toml wgcf-profile.conf
 
 # Extract only the fields consumed by Xray; validate them before writing shell assignments.
-python3 - wgcf-profile.conf "$SECRETS_FILE" <<'PY'
+python3 - wgcf-profile.conf "$SECRETS_FILE" "${WARP_ENDPOINT:-}" <<'PY'
 import configparser
 import ipaddress
 import os
@@ -71,7 +74,8 @@ import re
 import sys
 import tempfile
 
-profile, output = sys.argv[1:]
+profile, output = sys.argv[1], sys.argv[2]
+pinned_endpoint = sys.argv[3] if len(sys.argv) > 3 else ""
 cfg = configparser.ConfigParser(interpolation=None, strict=False)
 cfg.read(profile)
 try:
@@ -106,7 +110,7 @@ values = {
     "WARP_PRIVATE_KEY": private_key,
     "WARP_ADDRESS": ",".join(str(x) for x in addresses),
     "WARP_RESERVED": reserved,
-    "WARP_ENDPOINT": endpoint,
+    "WARP_ENDPOINT": pinned_endpoint or endpoint,
     "WARP_PUBLIC_KEY": public_key,
     "WARP_MTU": str(mtu),
 }

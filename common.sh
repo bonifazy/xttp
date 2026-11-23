@@ -85,6 +85,10 @@ WARP_ENABLED="${WARP_ENABLED:-0}"
 WARP_PRIVATE_KEY="${WARP_PRIVATE_KEY:-}"
 WARP_ADDRESS="${WARP_ADDRESS:-}"
 WARP_RESERVED="${WARP_RESERVED:-}"
+_WARP_ENDPOINT_FROM_ENV=""
+if grep -qE '^[[:space:]]*WARP_ENDPOINT=' "${SCRIPT_DIR}/.env"; then
+  _WARP_ENDPOINT_FROM_ENV="${WARP_ENDPOINT:-}"
+fi
 WARP_ENDPOINT="${WARP_ENDPOINT:-engage.cloudflareclient.com:2408}"
 WARP_PUBLIC_KEY="${WARP_PUBLIC_KEY:-bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=}"
 WARP_MTU="${WARP_MTU:-1280}"
@@ -100,6 +104,13 @@ fi
 if [[ -f "${SCRIPT_DIR}/.warp_secrets" ]]; then
   # shellcheck disable=SC1091
   source "${SCRIPT_DIR}/.warp_secrets"
+fi
+# Пин из .env (HEL 8.34.70.140) важнее endpoint, который записал wgcf.
+if [[ -n "${_WARP_ENDPOINT_FROM_ENV:-}" ]]; then
+  WARP_ENDPOINT="${_WARP_ENDPOINT_FROM_ENV}"
+fi
+if [[ -n "${WARP_ENDPOINT:-}" && "$WARP_ENDPOINT" != *:* ]]; then
+  WARP_ENDPOINT="${WARP_ENDPOINT}:2408"
 fi
 
 SUBS_PATH="${SUBS_PATH:-}"
@@ -181,7 +192,7 @@ case "$WARP_ENABLED" in
   *) _die "WARP_ENABLED должен быть 0 или 1. Сейчас: '${WARP_ENABLED}'" ;;
 esac
 if [[ "$WARP_ENABLED" == "1" ]]; then
-  [[ "$ROLE" == "edge" ]] || _die "WARP_ENABLED пока поддерживается только для ROLE=edge"
+  [[ "$ROLE" == "edge" || "$ROLE" == "relay" ]] || _die "WARP_ENABLED поддерживается для ROLE=edge или relay"
   [[ -n "$WARP_PRIVATE_KEY" && -n "$WARP_ADDRESS" ]] || _die "WARP_ENABLED=1 требует WARP_PRIVATE_KEY и WARP_ADDRESS из WARP WireGuard-профиля"
   [[ -n "$WARP_DOMAINS" ]] || _die "WARP_ENABLED=1 требует хотя бы один домен в WARP_DOMAINS"
   [[ "$WARP_MTU" =~ ^[0-9]+$ ]] && [[ "$WARP_MTU" -ge 576 && "$WARP_MTU" -le 1420 ]] || _die "WARP_MTU должен быть числом от 576 до 1420"
@@ -258,8 +269,8 @@ resolve_tmp_certificate_domain() {
   echo "CERT_DOMAIN по SAN сертификата из /tmp: ${CERT_DOMAIN} (DOMAIN_NAME=${DOMAIN_NAME})"
 }
 
-if [[ "$ROLE" == "relay" && -z "$EU_SERVER_LINK" ]]; then
-  _die "ROLE=relay требует EU_SERVER_LINK в .env (путь подписки backbone в secrets, не каждый main.sh новый)"
+if [[ "$ROLE" == "relay" && -z "$EU_SERVER_LINK" && "$WARP_ENABLED" != "1" ]]; then
+  _die "ROLE=relay требует EU_SERVER_LINK в .env или WARP_ENABLED=1 (без backbone)"
 fi
 
 if [[ ! "$EU_SERVER_PORT" =~ ^[0-9]+$ ]] || [[ "$EU_SERVER_PORT" -lt 1 || "$EU_SERVER_PORT" -gt 65535 ]]; then
@@ -760,7 +771,7 @@ write_xray_config() {
     echo "write_xray_config: нет XHTTP_PATH" >&2
     return 1
   fi
-  if [[ "$ROLE" == "relay" ]]; then
+  if [[ "$ROLE" == "relay" && ( "$WARP_ENABLED" != "1" || -n "${EU_SERVER_LINK:-}" ) ]]; then
     if [[ -z "$eu_uuid" ]]; then
       echo "write_xray_config: нет EU_UUID" >&2
       return 1
@@ -810,6 +821,41 @@ def xhttp_settings(path, mode, cdn=False):
     return settings
 
 
+def warp_outbound():
+    peer = {
+        "publicKey": warp_public_key,
+        "endpoint": warp_endpoint,
+        "allowedIPs": ["0.0.0.0/0", "::/0"],
+    }
+    settings = {
+        "secretKey": warp_private_key,
+        "address": [part.strip() for part in warp_address.split(",") if part.strip()],
+        "peers": [peer],
+        "mtu": warp_mtu,
+    }
+    if warp_reserved:
+        settings["reserved"] = [int(part) for part in warp_reserved.split(",")]
+    return {
+        "protocol": "wireguard",
+        "tag": "warp",
+        "settings": settings,
+        "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4"}},
+    }
+
+
+def warp_domain_list():
+    domains = []
+    for item in warp_domains.replace(",", " ").split():
+        item = item.strip()
+        if item and ":" not in item:
+            item = "domain:" + item
+        if item and item not in domains:
+            domains.append(item)
+    if not domains:
+        raise SystemExit("WARP_ENABLED=1 требует домены в WARP_DOMAINS")
+    return domains
+
+
 log = {"loglevel": "warning", "access": "none"}
 
 sniff = {
@@ -849,6 +895,10 @@ inbound = {
 inbounds = [inbound]
 
 if role == "relay":
+    use_warp = warp_enabled == "1"
+    use_eu = bool(eu_uuid) and bool(eu_xhttp_path)
+    if not use_warp and not use_eu:
+        raise SystemExit("relay: нужен EU hop или WARP_ENABLED=1")
     eu = {
         "tag": "eu",
         "protocol": "vless",
@@ -873,8 +923,16 @@ if role == "relay":
             "xhttpSettings": xhttp_settings(eu_xhttp_path, eu_xhttp_mode),
             "sockopt": {"domainStrategy": "UseIPv4"},
         },
-    }
-    outbounds = [eu, direct, block]
+    } if use_eu else None
+    if use_warp and use_eu:
+        outbounds = [eu, warp_outbound(), direct, block]
+        foreign = "eu"
+    elif use_warp:
+        outbounds = [warp_outbound(), direct, block]
+        foreign = "warp"
+    else:
+        outbounds = [eu, direct, block]
+        foreign = "eu"
     inbounds.append({
         "tag": "dns-via-eu",
         "listen": "127.0.0.1",
@@ -886,18 +944,26 @@ if role == "relay":
             "network": "tcp,udp",
         },
     })
+    own_direct = [d for d in (
+        f"full:{domain}" if domain else "",
+        f"full:{eu_host}" if eu_host else "",
+        f"domain:{cert_domain}" if cert_domain else "",
+    ) if d]
     rules = [
-        {"type": "field", "inboundTag": ["dns-via-eu"], "outboundTag": "eu"},
+        {"type": "field", "inboundTag": ["dns-via-eu"], "outboundTag": foreign},
         {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"},
         {"type": "field", "domain": ["geosite:category-ads-all", "geosite:category-public-tracker"], "outboundTag": "block"},
-        {"type": "field", "domain": [d for d in (
-            f"full:{domain}" if domain else "",
-            f"full:{eu_host}" if eu_host else "",
-            f"domain:{cert_domain}" if cert_domain else "",
-        ) if d], "outboundTag": "direct"},
-        {"type": "field", "domain": ["geosite:category-ru", "regexp:.*\\.ru$", "regexp:.*\\.su$", "domain:xn--p1ai"], "outboundTag": "direct"},
-        {"type": "field", "ip": ["geoip:ru", "geoip:private"], "outboundTag": "direct"},
     ]
+    if use_warp:
+        rules.append({"type": "field", "domain": warp_domain_list(), "outboundTag": "warp"})
+    if own_direct:
+        rules.append({"type": "field", "domain": own_direct, "outboundTag": "direct"})
+    rules.append({"type": "field", "domain": ["geosite:category-ru", "regexp:.*\\.ru$", "regexp:.*\\.su$", "domain:xn--p1ai"], "outboundTag": "direct"})
+    # WARP: не шлём geoip:ru в direct — Instagram/CDN с «российским» IP иначе обойдёт туннель.
+    if use_warp:
+        rules.append({"type": "field", "ip": ["geoip:private"], "outboundTag": "direct"})
+    else:
+        rules.append({"type": "field", "ip": ["geoip:ru", "geoip:private"], "outboundTag": "direct"})
 else:
     dns_local = {
         "protocol": "freedom",
@@ -912,35 +978,8 @@ else:
         {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"},
     ]
     if role == "edge" and warp_enabled == "1":
-        outbounds.append({
-            "protocol": "wireguard",
-            "tag": "warp",
-            "settings": {
-                "secretKey": warp_private_key,
-                "address": [part.strip() for part in warp_address.split(",") if part.strip()],
-                "peers": [{
-                    "publicKey": warp_public_key,
-                    "endpoint": warp_endpoint,
-                    "allowedIPs": ["0.0.0.0/0", "::/0"],
-                }],
-                "mtu": warp_mtu,
-                **({"reserved": [int(part) for part in warp_reserved.split(",")]} if warp_reserved else {}),
-            },
-        })
-        domains = []
-        for item in warp_domains.replace(",", " ").split():
-            item = item.strip()
-            if item and ":" not in item:
-                item = "domain:" + item
-            if item and item not in domains:
-                domains.append(item)
-        if not domains:
-            raise SystemExit("WARP_ENABLED=1 требует домены в WARP_DOMAINS")
-        rules.append({
-            "type": "field",
-            "domain": domains,
-            "outboundTag": "warp",
-        })
+        outbounds.append(warp_outbound())
+        rules.append({"type": "field", "domain": warp_domain_list(), "outboundTag": "warp"})
 
 cfg = {
     "log": log,

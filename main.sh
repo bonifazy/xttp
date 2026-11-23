@@ -7,8 +7,8 @@
 #      При паре в /tmp CERT_DOMAIN определяется по SAN сертификата, который
 #      обязан покрывать DOMAIN_NAME; пара копируется в /etc/ssl/<CERT_DOMAIN>.
 #   3. DNS DOMAIN_NAME смотрит на этот VPS
-#   4. ROLE=relay: EU_SERVER_LINK = постоянная vless-ссылка backbone
-#      (XHTTP packet-up). SUBS_PATH из secrets; новый только если пусто.
+#   4. ROLE=relay: EU_SERVER_LINK = hop backbone, или WARP_ENABLED=1 без hop
+#      (YouTube/список в WARP_DOMAINS через WARP). SUBS_PATH из secrets.
 #
 # Идемпотентно: .xttp_secrets не перезаписывает. Конфиги собирает заново.
 # ROLE=relay/edge: клиентская ссылка — XHTTP stream-up; downloadSettings использует TCP второй порт или HTTP/3.
@@ -52,6 +52,7 @@ fi
 echo "CLIENT_PORT: $CLIENT_PORT"
 echo "WARP_ENABLED: ${WARP_ENABLED}"
 if [[ "$WARP_ENABLED" == "1" ]]; then
+  echo "WARP_ENDPOINT: ${WARP_ENDPOINT}"
   echo "WARP_DOMAINS: ${WARP_DOMAINS}"
 fi
 if [[ "$CDN_ENABLED" == "1" ]]; then
@@ -151,13 +152,17 @@ if [[ -n "${XHTTP_PATH:-}" ]]; then
   echo "XHTTP_PATH: $XHTTP_PATH"
 fi
 
-# ROLE=relay: EU_UUID из EU_SERVER_LINK или с подписки backbone, ДО рабочего конфига.
+# ROLE=relay: hop из EU_SERVER_LINK, если выход не один WARP.
 if [[ "$ROLE" == "relay" ]]; then
   echo ""
-  resolve_relay_eu_uuid
-  write_secrets
-  echo "EU_UUID: $EU_UUID"
-  echo "EU outbound: ${EU_SERVER_DOMAIN}:${EU_SERVER_PORT} sni=${EU_SNI} path=${EU_XHTTP_PATH} mode=${EU_XHTTP_MODE}"
+  if [[ "$WARP_ENABLED" == "1" && -z "${EU_SERVER_LINK:-}" ]]; then
+    echo "EU hop: нет — зарубежный выход WARP, домены WARP_DOMAINS → warp"
+  else
+    resolve_relay_eu_uuid
+    write_secrets
+    echo "EU_UUID: $EU_UUID"
+    echo "EU outbound: ${EU_SERVER_DOMAIN}:${EU_SERVER_PORT} sni=${EU_SNI} path=${EU_XHTTP_PATH} mode=${EU_XHTTP_MODE}"
+  fi
 fi
 
 backup_if_exists "$XRAY_CONFIG" xray_config.json
