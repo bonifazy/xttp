@@ -971,6 +971,18 @@ if role == "relay":
     ]
     if use_warp:
         rules.append({"type": "field", "domain": warp_domain_list(), "outboundTag": "warp"})
+    # YouTube с RU VPS, не через EU hop. Если домен уже в WARP_DOMAINS — правило WARP выше победит.
+    rules.append({
+        "type": "field",
+        "domain": [
+            "domain:youtube.com", "domain:youtu.be", "domain:yt.be",
+            "domain:youtube-nocookie.com", "domain:youtubekids.com",
+            "domain:googlevideo.com", "domain:ytimg.com", "domain:ggpht.com",
+            "full:youtubei.googleapis.com", "full:youtube.googleapis.com",
+            "full:youtubeembeddedplayer.googleapis.com", "domain:yt3.googleusercontent.com",
+        ],
+        "outboundTag": "direct",
+    })
     if own_direct:
         rules.append({"type": "field", "domain": own_direct, "outboundTag": "direct"})
     rules.append({"type": "field", "domain": ["geosite:category-ru", "regexp:.*\\.ru$", "regexp:.*\\.su$", "domain:xn--p1ai"], "outboundTag": "direct"})

@@ -18,14 +18,6 @@ CLIENT_MODE="stream-up"
 
 # *** Specific settings! ***
 
-# Yandex Cloud CDN: TLS→CDN, CDN HTTP→VPS:18081→HAProxy→Xray
-# CDN_ENABLED=0
-# CDN_ORIGIN_PORT=18081
-# CDN_UPLINK_HTTP_METHOD="GET"
-# CDN_UPLINK_DATA_PLACEMENT="cookie"
-# CDN_UPLINK_CHUNK_SIZE=512
-# CDN_PREFIX_URL="https://tech.cdn.yandex.net/prefixes/yc.json"
-
 # Set domain without wildcard cert
 # ACME_EMAIL="you@example.com"
 
@@ -41,17 +33,16 @@ EU_SERVER_PORT=443
 # Edge + WARP: WARP_DOMAINS, *.ru/.su/.рф и geoip:ru → WARP; остальное direct с VPS.
 WARP_ENABLED=0
 # Пин colo. Пустой WARP_ENDPOINT → по ROLE: edge=Москва DME, relay=HEL.
-WARP_ENDPOINT_EDGE=162.159.195.1:2408
-WARP_ENDPOINT_RELAY=8.34.70.140:2408
+# WARP_ENDPOINT_EDGE=162.159.195.1:2408
+# WARP_ENDPOINT_RELAY=8.34.70.140:2408
 # WARP_ENDPOINT=162.159.195.1:2408
-WARP_DOMAINS="instagram.com,cdninstagram.com,fbcdn.net,ig.me,strava.com,strava-cdn.com,stravausercontent.com"
-# YouTube через WARP (правьте список для следующего RU relay):
-WARP_DOMAINS="${WARP_DOMAINS},youtube.com,youtu.be,yt.be,youtube-nocookie.com,youtubekids.com,googlevideo.com,ytimg.com,ggpht.com"
-WARP_DOMAINS="${WARP_DOMAINS},youtubei.googleapis.com,youtube.googleapis.com,youtubeembeddedplayer.googleapis.com,yt3.googleusercontent.com"
+# WARP_DOMAINS="instagram.com,cdninstagram.com,fbcdn.net,ig.me,strava.com,strava-cdn.com,stravausercontent.com"
+# YouTube через WARP (правьте список для следующего RU relay).
+# Без WARP те же домены на relay идут direct с RU VPS, не на EU hop:
+# WARP_DOMAINS="${WARP_DOMAINS},youtube.com,youtu.be,yt.be,youtube-nocookie.com,youtubekids.com,googlevideo.com,ytimg.com,ggpht.com"
+# WARP_DOMAINS="${WARP_DOMAINS},youtubei.googleapis.com,youtube.googleapis.com,youtubeembeddedplayer.googleapis.com,yt3.googleusercontent.com"
 
-# AdGuard. ROLE=relay: всё остальное → DNS_PROVIDERS (по умолчанию Google DoH).
-# Зоны .ru (и .su / .рф) в Яндекс уходят всегда — DNS_PROVIDERS на них не влияет.
-# Первый в DNS_PROVIDERS — основной для «остального», следующие — fallback. Каталог:
+# AdGuard. for ROLE=relay: ru* over Yandex, other → DNS_PROVIDERS, default Google DoH.
 #   google      https://dns.google/dns-query
 #   cloudflare  https://cloudflare-dns.com/dns-query  1.1.1.1  1.0.0.1
 #   dnswatch    84.200.69.80  84.200.70.40
