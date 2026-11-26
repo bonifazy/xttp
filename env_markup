@@ -49,4 +49,14 @@ WARP_DOMAINS="instagram.com,cdninstagram.com,fbcdn.net,ig.me,strava.com,strava-c
 WARP_DOMAINS="${WARP_DOMAINS},youtube.com,youtu.be,yt.be,youtube-nocookie.com,youtubekids.com,googlevideo.com,ytimg.com,ggpht.com"
 WARP_DOMAINS="${WARP_DOMAINS},youtubei.googleapis.com,youtube.googleapis.com,youtubeembeddedplayer.googleapis.com,yt3.googleusercontent.com"
 
+# AdGuard. ROLE=relay: всё остальное → DNS_PROVIDERS (по умолчанию Google DoH).
+# Зоны .ru (и .su / .рф) в Яндекс уходят всегда — DNS_PROVIDERS на них не влияет.
+# Первый в DNS_PROVIDERS — основной для «остального», следующие — fallback. Каталог:
+#   google      https://dns.google/dns-query
+#   cloudflare  https://cloudflare-dns.com/dns-query  1.1.1.1  1.0.0.1
+#   dnswatch    84.200.69.80  84.200.70.40
+#   quad9       https://dns.quad9.net/dns-query  9.9.9.9  149.112.112.112
+#   adguard     https://dns.adguard-dns.com/dns-query  94.140.14.14  94.140.15.15
+#   yandex      https://common.dot.dns.yandex.net/dns-query  77.88.8.8
+DNS_PROVIDERS="google"
 

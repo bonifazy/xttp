@@ -75,6 +75,11 @@ if [[ "$ROLE" == "relay" ]]; then
   echo "AdGuard via EU: 127.0.0.1:${ADGUARD_VIA_EU_PORT} → ${ADGUARD_VIA_EU_DEST}:53"
 fi
 echo "AdGuard DNS: ${ADGUARD_DNS_ADDR}:${ADGUARD_DNS_PORT}  UI: http://${ADGUARD_UI_ADDR}"
+if [[ "$ROLE" == "relay" ]]; then
+  echo "AdGuard split: *.ru → Yandex DoH; остальное → DNS_PROVIDERS=${DNS_PROVIDERS}"
+else
+  echo "DNS_PROVIDERS: ${DNS_PROVIDERS}"
+fi
 echo "AdGuard cache: ${ADGUARD_CACHE_SIZE} B, ttl_min=${ADGUARD_CACHE_TTL_MIN}s ttl_max=${ADGUARD_CACHE_TTL_MAX}"
 echo ""
 

@@ -66,6 +66,8 @@ XRAY_USER="${XRAY_USER:-nobody}"
 XRAY_GROUP="${XRAY_GROUP:-nogroup}"
 
 ROLE="${ROLE:-edge}"
+# Первый в DNS_PROVIDERS — основной апстрим (не-*.ru на relay; все зоны на edge/backbone). Каталог: env_markup.
+DNS_PROVIDERS="${DNS_PROVIDERS:-google}"
 DOMAIN_NAME="${DOMAIN_NAME:-}"
 # SUBS_PATH из .env игнорируем: берём из secrets. main.sh генерирует, только если пусто.
 unset SUBS_PATH
@@ -767,7 +769,7 @@ publish_link() {
 # Собирает /usr/local/etc/xray/config.json. В xhttpSettings только path и mode.
 # XHTTP-паддинг ядро ставит само (xPaddingBytes 100-1000, Referer x_padding / X-Padding).
 # DNS только в AdGuard 127.0.0.1:5353.
-# relay: *.ru — Яндекс DoH; hop — DNS хостера; остальное — DNS.WATCH. Edge/backbone — DNS.WATCH.
+# relay: *.ru/*.su/*.рф — Яндекс DoH; hop — DNS хостера; остальное — DNS_PROVIDERS (по умолчанию Google DoH).
 # edge/backbone уже в EU: UDP/TCP 53 с xhttp-in → этот же AdGuard.
 # Все роли: VLESS+XHTTP на 127.0.0.1 (TLS снимает HAProxy).
 # relay outbound: XHTTP packet-up + TLS на backbone.
@@ -1361,9 +1363,82 @@ adguard_chown_tree() {
   sudo chmod -R u+rwX,go+rX "${ADGUARD_DIR}/conf" "${ADGUARD_DIR}/work"
 }
 
+# Каталог имён → строки AdGuard. DNS_PROVIDERS: первый основной, остальные fallback.
+adguard_provider_upstreams() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    google) printf '%s\n' 'https://dns.google/dns-query' ;;
+    cloudflare) printf '%s\n' 'https://cloudflare-dns.com/dns-query' '1.1.1.1' '1.0.0.1' ;;
+    dnswatch) printf '%s\n' '84.200.69.80' '84.200.70.40' ;;
+    quad9) printf '%s\n' 'https://dns.quad9.net/dns-query' '9.9.9.9' '149.112.112.112' ;;
+    adguard) printf '%s\n' 'https://dns.adguard-dns.com/dns-query' '94.140.14.14' '94.140.15.15' ;;
+    yandex) printf '%s\n' 'https://common.dot.dns.yandex.net/dns-query' '77.88.8.8' ;;
+    *) return 1 ;;
+  esac
+}
+
+# IPv4, чтобы AdGuard резолвил хост DoH (dns.google и т.п.). Не путать с апстримом.
+adguard_provider_bootstrap() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    google) printf '%s\n' '8.8.8.8' '8.8.4.4' ;;
+    cloudflare) printf '%s\n' '1.1.1.1' '1.0.0.1' ;;
+    dnswatch) printf '%s\n' '84.200.69.80' '84.200.70.40' ;;
+    quad9) printf '%s\n' '9.9.9.9' '149.112.112.112' ;;
+    adguard) printf '%s\n' '94.140.14.14' '94.140.15.15' ;;
+    yandex) printf '%s\n' '77.88.8.8' ;;
+  esac
+}
+
+adguard_yaml_items() {
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" ]] && continue
+    printf '    - %s\n' "$line"
+  done <<< "$1"
+}
+
+adguard_expand_dns_providers() {
+  local raw name lines boot seen="" first=1
+  local -a names
+  ADGUARD_UPSTREAM_LINES=""
+  ADGUARD_FALLBACK_LINES=""
+  ADGUARD_BOOTSTRAP_IPS=""
+  ADGUARD_DNS_DEFAULT=""
+  raw="$(printf '%s' "${DNS_PROVIDERS:-}" | tr ',;' ' ')"
+  # shellcheck disable=SC2206
+  names=( $raw )
+  [[ ${#names[@]} -gt 0 ]] || _die "DNS_PROVIDERS пуст. Пример: DNS_PROVIDERS=\"google\""
+  for name in "${names[@]}"; do
+    [[ -n "$name" ]] || continue
+    lines="$(adguard_provider_upstreams "$name")" || _die "неизвестный DNS-провайдер '${name}'. Каталог: google cloudflare dnswatch quad9 adguard yandex"
+    if [[ "$first" -eq 1 ]]; then
+      ADGUARD_DNS_DEFAULT="$name"
+      ADGUARD_UPSTREAM_LINES="$lines"
+      first=0
+    elif [[ -n "$ADGUARD_FALLBACK_LINES" ]]; then
+      ADGUARD_FALLBACK_LINES="${ADGUARD_FALLBACK_LINES}"$'\n'"${lines}"
+    else
+      ADGUARD_FALLBACK_LINES="$lines"
+    fi
+    while IFS= read -r boot || [[ -n "$boot" ]]; do
+      [[ "$boot" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || continue
+      [[ " ${seen} " == *" ${boot} "* ]] && continue
+      seen="${seen} ${boot}"
+      ADGUARD_BOOTSTRAP_IPS="${ADGUARD_BOOTSTRAP_IPS:+${ADGUARD_BOOTSTRAP_IPS}$'\n'}${boot}"
+    done < <(adguard_provider_bootstrap "$name"; printf '%s\n' "$lines")
+  done
+  [[ -n "$ADGUARD_UPSTREAM_LINES" ]] || _die "DNS_PROVIDERS не дал ни одного апстрима"
+  [[ -n "$ADGUARD_FALLBACK_LINES" ]] || ADGUARD_FALLBACK_LINES="8.8.8.8"
+  [[ -n "$ADGUARD_BOOTSTRAP_IPS" ]] || ADGUARD_BOOTSTRAP_IPS=$'8.8.8.8\n8.8.4.4'
+  ADGUARD_BOOTSTRAP_YAML="$(adguard_yaml_items "$ADGUARD_BOOTSTRAP_IPS")"
+  ADGUARD_FALLBACK_YAML="$(adguard_yaml_items "$ADGUARD_FALLBACK_LINES")"
+  ADGUARD_BOOTSTRAP_YAML="${ADGUARD_BOOTSTRAP_YAML}"$'\n'
+  ADGUARD_FALLBACK_YAML="${ADGUARD_FALLBACK_YAML}"$'\n'
+}
+
 write_adguard_base_yaml() {
   local yaml="$1"
   local tmp
+  adguard_expand_dns_providers
   tmp="$(mktemp)"
   cat > "$tmp" <<EOF
 http:
@@ -1374,7 +1449,7 @@ dns:
   port: ${ADGUARD_DNS_PORT}
   upstream_dns_file: /opt/adguardhome/conf/upstreams.txt
   bootstrap_dns:
-    - 127.0.0.53
+${ADGUARD_BOOTSTRAP_YAML}
   protection_enabled: true
   filtering_enabled: true
   safebrowsing_enabled: false
@@ -1387,10 +1462,7 @@ dns:
   cache_optimistic: true
   ratelimit: 0
   fallback_dns:
-    - https://dns.google/dns-query
-    - 8.8.8.8
-    - 8.8.4.4
-    - 1.1.1.1
+${ADGUARD_FALLBACK_YAML}
 querylog:
   enabled: true
   file_enabled: true
@@ -1419,8 +1491,15 @@ write_adguard_config() {
   local conf_dir="${ADGUARD_DIR}/conf"
   local yaml="${conf_dir}/AdGuardHome.yaml"
   local ups="${conf_dir}/upstreams.txt"
-  local ups_tmp yaml_tmp
+  local ups_tmp yaml_tmp boot_tmp fall_tmp
   ADGUARD_NEED_RESTART=0
+  adguard_expand_dns_providers
+  export ADGUARD_UPSTREAM_LINES ADGUARD_FALLBACK_LINES DNS_PROVIDERS
+  if [[ "$ROLE" == "relay" ]]; then
+    echo "AdGuard: relay split *.ru → Yandex DoH; остальное → ${ADGUARD_DNS_DEFAULT} (${DNS_PROVIDERS})"
+  else
+    echo "AdGuard: DNS_PROVIDERS=${DNS_PROVIDERS} (основной=${ADGUARD_DNS_DEFAULT})"
+  fi
   mkdir -p "$conf_dir" "${ADGUARD_DIR}/work"
   adguard_chown_tree
   if [[ ! -f "$yaml" ]]; then
@@ -1467,21 +1546,29 @@ PY
     fi
     rm -f "$yaml_tmp"
   fi
-  # Keep the configured fallback resolvers in sync on existing installs too.
   yaml_tmp="$(mktemp)"
+  boot_tmp="$(mktemp)"
+  fall_tmp="$(mktemp)"
   sudo cat "$yaml" > "$yaml_tmp"
-  if "$PYTHON" - "$yaml_tmp" <<'PY'
+  printf '  bootstrap_dns:\n%s' "$ADGUARD_BOOTSTRAP_YAML" > "$boot_tmp"
+  printf '  fallback_dns:\n%s' "$ADGUARD_FALLBACK_YAML" > "$fall_tmp"
+  if "$PYTHON" - "$yaml_tmp" "$boot_tmp" "$fall_tmp" <<'PY'
 import re, sys
-path = sys.argv[1]
+path, boot_path, fall_path = sys.argv[1:]
 text = open(path, encoding="utf-8").read()
-block = "  fallback_dns:\n    - https://dns.google/dns-query\n    - 8.8.4.4\n    - 1.1.1.1"
-pattern = re.compile(r"(?m)^  fallback_dns:\n(?:^    .*\n|^    .*$)*")
-updated, count = pattern.subn(block + "\n", text, count=1)
-if count == 0:
-    marker = re.search(r"(?m)^querylog:", text)
+boot = open(boot_path, encoding="utf-8").read().rstrip("\n") + "\n"
+fall = open(fall_path, encoding="utf-8").read().rstrip("\n") + "\n"
+
+def put(src, key, block):
+    pattern = re.compile(rf"(?m)^  {re.escape(key)}:\n(?:^    .*\n)*")
+    if pattern.search(src):
+        return pattern.sub(block, src, count=1)
+    marker = re.search(r"(?m)^querylog:", src)
     if not marker:
-        sys.exit(2)
-    updated = text[:marker.start()] + block + "\n" + text[marker.start():]
+        raise SystemExit(2)
+    return src[:marker.start()] + block + src[marker.start():]
+
+updated = put(put(text, "bootstrap_dns", boot), "fallback_dns", fall)
 if updated != text:
     open(path, "w", encoding="utf-8").write(updated)
     sys.exit(0)
@@ -1490,9 +1577,9 @@ PY
   then
     sudo install -o "$PROJECT_USER" -g "$PROJECT_USER" -m 644 "$yaml_tmp" "$yaml"
     ADGUARD_NEED_RESTART=1
-    echo "AdGuard: fallback DNS → Google DoH, 8.8.4.4, 1.1.1.1"
+    echo "AdGuard: bootstrap/fallback из DNS_PROVIDERS=${DNS_PROVIDERS}"
   fi
-  rm -f "$yaml_tmp"
+  rm -f "$yaml_tmp" "$boot_tmp" "$fall_tmp"
   local eu_hop="${EU_SERVER_DOMAIN:-}"
   if [[ -z "$eu_hop" && -n "${EU_SERVER_LINK:-}" ]]; then
     eu_hop="${EU_SERVER_LINK#*@}"
@@ -1500,8 +1587,11 @@ PY
   fi
   ups_tmp="$(mktemp)"
   "$PYTHON" - "$ROLE" "$eu_hop" "${EU_SNI:-$eu_hop}" "${ADGUARD_VIA_EU_PORT}" <<'PY' > "$ups_tmp"
-import sys
+import os, sys
 role, eu_host, eu_sni, via_port = sys.argv[1:]
+upstreams = [ln.strip() for ln in os.environ.get("ADGUARD_UPSTREAM_LINES", "").splitlines() if ln.strip()]
+if not upstreams:
+    raise SystemExit("ADGUARD_UPSTREAM_LINES пуст")
 
 def ok(h):
     h = (h or "").strip().lower().rstrip(".")
@@ -1536,11 +1626,8 @@ if role == "relay":
         print("[/" + "/".join(names) + "/]" + hoster_ns())
     print("[/common.dot.dns.yandex.net/]77.88.8.8")
     print("[/ru/su/xn--p1ai/]https://common.dot.dns.yandex.net/dns-query 77.88.8.8")
-    print("84.200.69.80")
-    print("84.200.70.40")
-else:
-    print("84.200.69.80")
-    print("84.200.70.40")
+for u in upstreams:
+    print(u)
 PY
   if [[ ! -f "$ups" ]] || ! sudo cmp -s "$ups_tmp" "$ups"; then
     sudo install -o "$PROJECT_USER" -g "$PROJECT_USER" -m 644 "$ups_tmp" "$ups"
@@ -1906,9 +1993,11 @@ assert_role_frontends() {
   rm -f "$tmp"
 }
 
-# Живой запрос в AdGuard :5353 + query log. Relay: max.ru → Яндекс DoH, instagram.com → DNS.WATCH.
+# Живой запрос в AdGuard :5353 + query log. Relay: max.ru → Яндекс DoH, instagram.com → DNS_PROVIDERS.
 assert_adguard_dns_split() {
   echo "Проверка DNS AdGuard: max.ru и instagram.com @${ADGUARD_DNS_ADDR}:${ADGUARD_DNS_PORT}"
+  adguard_expand_dns_providers
+  export ADGUARD_UPSTREAM_LINES ADGUARD_FALLBACK_LINES DNS_PROVIDERS
   adguard_chown_tree
   "$PYTHON" - "$ROLE" "$ADGUARD_DNS_ADDR" "$ADGUARD_DNS_PORT" "$ADGUARD_UI_ADDR" \
     "${ADGUARD_DIR}/work" <<'PY' || _die "проверка DNS AdGuard не прошла"
@@ -2039,12 +2128,28 @@ for host, expect in checks:
     cached = bool(entry.get("cached") or entry.get("Cached"))
     ips = ", ".join(entry_ips(entry)[:4]) or "-"
     low = upstream.lower()
+    providers = os.environ.get("DNS_PROVIDERS", "").strip() or "DNS_PROVIDERS"
+    general = []
+    for blob in (os.environ.get("ADGUARD_UPSTREAM_LINES", ""), os.environ.get("ADGUARD_FALLBACK_LINES", "")):
+        general.extend(ln.strip() for ln in blob.splitlines() if ln.strip())
+
+    def general_hit(text):
+        for ln in general:
+            item = ln.lower()
+            if item in text:
+                return True
+            if item.startswith("https://"):
+                host = item.split("/")[2].split(":")[0]
+                if host in text:
+                    return True
+        return False
+
     if expect == "yandex":
         hit = ("yandex" in low) or ("77.88.8.8" in low)
         want = "DoH Yandex / 77.88.8.8"
     else:
-        hit = ("84.200.69.80" in low) or ("84.200.70.40" in low) or ("dns.watch" in low)
-        want = "DNS.WATCH / 84.200.69.80 / 84.200.70.40"
+        hit = general_hit(low)
+        want = providers
     if role != "relay":
         print(f"{host}: {ips}  upstream={upstream or '-'}  cached={cached}  (не relay — split не проверяем)")
         continue
