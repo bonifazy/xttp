@@ -53,11 +53,6 @@ DOWNLOAD_LISTEN=""
 XHTTP_MODE="auto"
 # Hop relay→backbone: packet-up (короткие POST). Не Vision: он только с TCP/stream-one.
 EU_XHTTP_MODE="${EU_XHTTP_MODE:-packet-up}"
-# telemt #844: на hop RU→EU режем только TLS ClientHello, не весь TCP.
-# 1 — включено (по умолчанию). 0 — обычный набор без fragment.
-HELLO_FRAG="${HELLO_FRAG:-0}"
-HELLO_FRAG_LENGTH="${HELLO_FRAG_LENGTH:-80-120}"
-HELLO_FRAG_INTERVAL="${HELLO_FRAG_INTERVAL:-8-20}"
 XRAY_XHTTP_LISTEN="127.0.0.1"
 XRAY_XHTTP_PORT=10085
 NGINX_FALLBACK="127.0.0.1:8081"
@@ -331,13 +326,6 @@ if [[ "$ROLE" == "relay" || "$ROLE" == "backbone" ]]; then
   case "$EU_XHTTP_MODE" in
     packet-up|stream-up|auto) ;;
     *) _die "EU_XHTTP_MODE: packet-up, stream-up или auto. Сейчас: '${EU_XHTTP_MODE}'" ;;
-  esac
-fi
-
-if [[ "$ROLE" == "relay" ]]; then
-  case "$HELLO_FRAG" in
-    0|1) ;;
-    *) _die "HELLO_FRAG: 0 или 1. Сейчас: '${HELLO_FRAG}'" ;;
   esac
 fi
 
@@ -773,7 +761,6 @@ publish_link() {
 # edge/backbone уже в EU: UDP/TCP 53 с xhttp-in → этот же AdGuard.
 # Все роли: VLESS+XHTTP на 127.0.0.1 (TLS снимает HAProxy).
 # relay outbound: XHTTP packet-up + TLS на backbone.
-# ClientHello-only fragment — патч xray-core (XRAY_HELLO_FRAG в unit), не JSON.
 write_xray_config() {
   local uuid="${1:-$UUID}"
   local xhttp_path="${2:-${XHTTP_PATH:-}}"
@@ -1749,9 +1736,6 @@ CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 ExecStart=/usr/local/bin/xray run -config ${XRAY_CONFIG}
-Environment=XRAY_HELLO_FRAG=${HELLO_FRAG}
-Environment=XRAY_HELLO_FRAG_LENGTH=${HELLO_FRAG_LENGTH}
-Environment=XRAY_HELLO_FRAG_INTERVAL=${HELLO_FRAG_INTERVAL}
 Restart=on-failure
 RestartPreventExitStatus=23
 LimitNPROC=10000
@@ -1769,9 +1753,6 @@ User=${unit_user}
 Group=${unit_group}
 ExecStart=
 ExecStart=/usr/local/bin/xray run -config ${XRAY_CONFIG}
-Environment=XRAY_HELLO_FRAG=${HELLO_FRAG}
-Environment=XRAY_HELLO_FRAG_LENGTH=${HELLO_FRAG_LENGTH}
-Environment=XRAY_HELLO_FRAG_INTERVAL=${HELLO_FRAG_INTERVAL}
 EOF
   sudo systemctl daemon-reload
 }
@@ -1793,8 +1774,8 @@ adopt_xray_runtime_user() {
   fi
 }
 
-# Xray на VPS: готовый ELF из xray-core/xray-linux-* (сборка на Mac: ./build_xray_release.sh).
-# Патч hello_frag уже внутри бинарника. Go/swap на VPS не нужны. GitHub не качаем.
+# Xray на VPS: официальный ELF XTLS из xray-core/xray-linux-* (на Mac: ./build_xray_release.sh).
+# Go/swap на VPS не нужны. GitHub на VPS не качаем.
 linux_xray_arch() {
   local debarch
   debarch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
@@ -1805,18 +1786,11 @@ linux_xray_arch() {
   esac
 }
 
-# Не grep -q в пайпе: при pipefail xray version ловит SIGPIPE и if считает провал.
-xray_has_hello_frag() {
-  local out
-  out="$(/usr/local/bin/xray version 2>&1 || true)"
-  [[ "$out" == *xttp-hello-frag* ]]
-}
-
 install_xray() {
   local src="${SCRIPT_DIR}/xray-core"
-  local arch tag stamp bin
+  local arch tag stamp bin skip_xray
   if [[ "$(uname -s)" != "Linux" ]]; then
-    _die "Xray ставится только на Ubuntu VPS. Сейчас: $(uname -s). Сборка релиза: ./build_xray_release.sh"
+    _die "Xray ставится только на Ubuntu VPS. Сейчас: $(uname -s). Релиз: ./build_xray_release.sh"
   fi
   if [[ ! -f /etc/os-release ]]; then
     _die "нет /etc/os-release — нужен Ubuntu 22.04, 24.04 или 26.04"
@@ -1832,28 +1806,29 @@ install_xray() {
   esac
   arch="$(linux_xray_arch)" || _die "архитектура $(uname -m): нужен amd64 или arm64"
   tag="$(head -n 1 "${src}/XTLS_TAG" 2>/dev/null | tr -d '[:space:]')"
-  tag="${tag:-v26.10.17}"
+  tag="${tag:-v26.11.9}"
   stamp="/usr/local/share/xray/.xttp_build"
   bin="${src}/xray-linux-${arch}"
   if [[ ! -f "$bin" ]]; then
-    _die "нет ${bin}. На Mac: ./build_xray_release.sh и скопируйте xray-core/xray-linux-* на VPS."
+    _die "нет ${bin}. На Mac: ./build_xray_release.sh (официальный zip XTLS) и скопируйте xray-core/xray-linux-* на VPS."
   fi
-  if [[ -x /usr/local/bin/xray ]] && [[ -f "$stamp" ]] \
-    && [[ "$(cat "$stamp")" == "${tag} hello-frag ${arch}" ]] \
-    && xray_has_hello_frag; then
-    echo "Xray ${tag} linux/${arch} уже стоит (xttp-hello-frag)"
+  skip_xray=0
+  if [[ -x /usr/local/bin/xray && -f "$stamp" ]]; then
+    case "$(cat "$stamp")" in
+      "${tag} ${arch}") skip_xray=1 ;;
+    esac
+  fi
+  if [[ "$skip_xray" -eq 1 ]]; then
+    echo "Xray ${tag} linux/${arch} уже стоит"
   else
-    echo "Ставлю Xray ${tag} linux/${arch} из ${bin} (не GitHub, не go build)"
+    echo "Ставлю Xray ${tag} linux/${arch} из ${bin} (официальный XTLS)"
     sudo install -o root -g root -m 755 "$bin" /usr/local/bin/xray
     sudo mkdir -p /usr/local/share/xray
-    echo "${tag} hello-frag ${arch}" | sudo tee "$stamp" >/dev/null
+    echo "${tag} ${arch}" | sudo tee "$stamp" >/dev/null
   fi
   sudo /usr/local/bin/xray version || sudo /usr/local/bin/xray -version
   if [[ ! -x /usr/local/bin/xray ]]; then
     _die "после установки нет /usr/local/bin/xray"
-  fi
-  if ! xray_has_hello_frag; then
-    _die "/usr/local/bin/xray без xttp-hello-frag — это не наш релиз"
   fi
   adopt_xray_runtime_user
   echo "xray.service -> ${XRAY_CONFIG} (User=${XRAY_USER})"

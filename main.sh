@@ -13,8 +13,7 @@
 # Идемпотентно: .xttp_secrets не перезаписывает. Конфиги собирает заново.
 # ROLE=relay/edge: клиентская ссылка — XHTTP stream-up; downloadSettings использует TCP второй порт или HTTP/3.
 # ROLE=backbone: ссылка для relay — XHTTP packet-up; снаружи HAProxy+SearXNG.
-# Xray: готовый ELF из xray-core/xray-linux-* (сборка на Mac: ./build_xray_release.sh).
-# Патч hello_frag внутри бинарника. С GitHub/Xray-install не качаем.
+# Xray: официальный ELF XTLS из xray-core/xray-linux-* (на Mac: ./build_xray_release.sh).
 set -euo pipefail
 
 # shellcheck disable=SC1091
@@ -67,11 +66,6 @@ if [[ "$ROLE" == "relay" || "$ROLE" == "backbone" ]]; then
   echo "EU_XHTTP_MODE: $EU_XHTTP_MODE"
 fi
 if [[ "$ROLE" == "relay" ]]; then
-  if [[ "$HELLO_FRAG" == "1" ]]; then
-    echo "HELLO_FRAG: tlshello ${HELLO_FRAG_LENGTH} / ${HELLO_FRAG_INTERVAL}ms"
-  else
-    echo "HELLO_FRAG: выключен"
-  fi
   echo "AdGuard via EU: 127.0.0.1:${ADGUARD_VIA_EU_PORT} → ${ADGUARD_VIA_EU_DEST}:53"
 fi
 echo "AdGuard DNS: ${ADGUARD_DNS_ADDR}:${ADGUARD_DNS_PORT}  UI: http://${ADGUARD_UI_ADDR}"
@@ -141,7 +135,7 @@ searxng_up
 adguard_up
 echo ""
 
-# Свой Xray из xray-core/xray-linux-* (hello_frag). Релизы XTLS не трогаем.
+# Официальный Xray XTLS из xray-core/xray-linux-*.
 install_xray
 echo ""
 

@@ -12,7 +12,7 @@ adguard/conf/upstreams.txt
 .gopath/
 .gocache/
 .goroot/
-# Сырое ядро Xray не в git. В репозитории только linux-релиз с hello_frag.
+# Сырое ядро Xray не в git. В репозитории только linux-релиз.
 xray-core/*
 !xray-core/xray-linux-amd64
 !xray-core/xray-linux-arm64
